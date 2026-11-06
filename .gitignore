@@ -1,0 +1,31 @@
+# Environment
+venv/
+.env
+
+# Agent artifacts & plans
+.agents/
+
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution & packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Testing & Coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+
+# IDE & Editor
+.vscode/
+.idea/
+*.swp
+*.swo
