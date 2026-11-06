@@ -65,6 +65,35 @@ class StateEncoder:
         self._vocabulary = unique_df.with_columns(id_series).select(["state_id", *self._feature_cols])
         return self
 
+    def partial_fit(self, df: pl.DataFrame | pl.LazyFrame) -> Self:
+        """Incrementally adds unseen state tuples to the vocabulary."""
+        if self._vocabulary is None or self._feature_cols is None:
+            return self.fit(df)
+
+        frame = df.collect() if isinstance(df, pl.LazyFrame) else df
+        missing = [c for c in self._feature_cols if c not in frame.columns]
+        if missing:
+            raise ValueError(f"Feature columns {missing} not found in DataFrame.")
+
+        selected = frame.select(list(self._feature_cols)).unique()
+        cur_id = len(self._id_to_tuple)
+        new_rows: list[tuple[Any, ...]] = []
+        for row in selected.iter_rows():
+            if row not in self._tuple_to_id:
+                self._tuple_to_id[row] = cur_id
+                self._id_to_tuple[cur_id] = row
+                new_rows.append(row)
+                cur_id += 1
+
+        if new_rows:
+            new_df = pl.DataFrame({col: [r[i] for r in new_rows] for i, col in enumerate(self._feature_cols)})
+            start_idx = len(self._id_to_tuple) - len(new_rows)
+            new_ids = pl.Series("state_id", np.arange(start_idx, len(self._id_to_tuple), dtype=np.int32))
+            appended = new_df.with_columns(new_ids).select(["state_id", *self._feature_cols])
+            self._vocabulary = pl.concat([self._vocabulary, appended])
+
+        return self
+
     def transform(self, df: pl.DataFrame | pl.LazyFrame) -> NDArray[np.int32]:
         """Transforms DataFrame rows into int32 atomic state IDs. Unseen rows map to -1."""
         if self._vocabulary is None or self._feature_cols is None:
@@ -203,6 +232,64 @@ class KWindowEncoder:
         unique_windows = sorted(set(valid_windows))
         self._window_to_id = {win: idx for idx, win in enumerate(unique_windows)}
         self._id_to_window = {idx: win for idx, win in enumerate(unique_windows)}
+
+        m = len(source_tuples)
+        sources_u = np.empty(m, dtype=np.int32)
+        targets_v = np.empty(m, dtype=np.int32)
+        time_arr = np.empty(m, dtype=np.int32)
+
+        for i in range(m):
+            sources_u[i] = self._window_to_id[source_tuples[i]]
+            targets_v[i] = target_states[i]
+            time_arr[i] = time_idxs[i]
+
+        return sources_u, targets_v, time_arr
+
+    def partial_fit_transform(
+        self,
+        states: NDArray[np.int32],
+        episode_ids: NDArray[np.int32] | None = None,
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.int32]]:
+        """Discovers new K-history windows and transforms (source_u, target_v, time_indices)."""
+        states_arr = np.asarray(states, dtype=np.int32)
+        n = len(states_arr)
+        if episode_ids is not None:
+            ep_arr = np.asarray(episode_ids, dtype=np.int32)
+            if len(ep_arr) != n:
+                raise ValueError("states and episode_ids must have the same length.")
+        else:
+            ep_arr = None
+
+        source_tuples: list[tuple[int, ...]] = []
+        target_states: list[int] = []
+        time_idxs: list[int] = []
+
+        for t in range(self._k - 1, n - 1):
+            target = int(states_arr[t + 1])
+            if target < 0:
+                continue
+
+            if ep_arr is not None and ep_arr[t + 1] != ep_arr[t]:
+                continue
+
+            start = t - self._k + 1
+            win_states = tuple(int(states_arr[idx]) for idx in range(start, t + 1))
+            if any(s < 0 for s in win_states):
+                continue
+
+            if ep_arr is not None:
+                first_ep = ep_arr[start]
+                if any(ep_arr[idx] != first_ep for idx in range(start + 1, t + 1)):
+                    continue
+
+            if win_states not in self._window_to_id:
+                new_id = len(self._id_to_window)
+                self._window_to_id[win_states] = new_id
+                self._id_to_window[new_id] = win_states
+
+            source_tuples.append(win_states)
+            target_states.append(target)
+            time_idxs.append(t)
 
         m = len(source_tuples)
         sources_u = np.empty(m, dtype=np.int32)

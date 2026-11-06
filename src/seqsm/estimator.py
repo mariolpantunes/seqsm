@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import Self
@@ -16,6 +17,42 @@ from seqsm.markov import KOrderMarkovChain
 from seqsm.motifs import score_anomalies
 from seqsm.schedule import ScheduleGenerator
 from seqsm.types import ModeType, PredictionMethod, ScheduleConstraints, ScheduleMethod
+
+
+def parse_duration(duration: str | timedelta) -> timedelta:
+    """Parses a duration string (e.g. '1d', '12h', '30m', '15s', '500ms') into a timedelta."""
+    if isinstance(duration, timedelta):
+        return duration
+    if not isinstance(duration, str):
+        raise TypeError(f"Expected str or timedelta, got {type(duration).__name__}")
+
+    s = duration.strip().lower()
+    if not s:
+        raise ValueError("Duration string cannot be empty.")
+
+    match = re.fullmatch(r"^(\d+(?:\.\d+)?)\s*(ms|us|µs|s|m|h|d|w)$", s)
+    if not match:
+        raise ValueError(
+            f"Invalid duration format: '{duration}'. Expected format like '1d', '12h', '30m', '15s', '500ms'."
+        )
+
+    val_str, unit = match.groups()
+    val = float(val_str)
+    if unit in ("us", "µs"):
+        return timedelta(microseconds=val)
+    if unit == "ms":
+        return timedelta(milliseconds=val)
+    if unit == "s":
+        return timedelta(seconds=val)
+    if unit == "m":
+        return timedelta(minutes=val)
+    if unit == "h":
+        return timedelta(hours=val)
+    if unit == "d":
+        return timedelta(days=val)
+    if unit == "w":
+        return timedelta(weeks=val)
+    raise ValueError(f"Unknown duration unit: '{unit}' in '{duration}'")
 
 
 class SeqSM:
@@ -79,16 +116,29 @@ class SeqSM:
     def _resolve_episodes(self, df: pl.DataFrame) -> NDArray[np.int32] | None:
         """Resolves episode boundary IDs based on episode_col or timestamp_col + max_time_gap."""
         if self.episode_col is not None and self.episode_col in df.columns:
-            return df[self.episode_col].to_numpy().astype(np.int32)
+            ep_series = df[self.episode_col]
+            if ep_series.dtype in (pl.Int8, pl.Int16, pl.Int32, pl.Int64, pl.UInt8, pl.UInt16, pl.UInt32, pl.UInt64):
+                return ep_series.to_numpy().astype(np.int32)
+            dense_ep = ep_series.to_physical() if ep_series.dtype == pl.Categorical else ep_series.rank("dense") - 1
+            return dense_ep.to_numpy().astype(np.int32)
 
         if self.timestamp_col is not None and self.max_time_gap is not None and self.timestamp_col in df.columns:
             ts = df[self.timestamp_col]
             diffs = ts.diff()
-            if isinstance(self.max_time_gap, timedelta):
-                gap_us = int(self.max_time_gap.total_seconds() * 1_000_000)
-                is_break = diffs.dt.total_microseconds() > gap_us
+            if isinstance(self.max_time_gap, (timedelta, str)):
+                gap_delta = parse_duration(self.max_time_gap)
+                if ts.dtype in (pl.Datetime, pl.Date, pl.Duration):
+                    gap_us = int(gap_delta.total_seconds() * 1_000_000)
+                    is_break = diffs.dt.total_microseconds() > gap_us
+                else:
+                    is_break = diffs > gap_delta.total_seconds()
             else:
-                is_break = diffs > self.max_time_gap
+                num_gap = float(self.max_time_gap)
+                if ts.dtype in (pl.Datetime, pl.Date, pl.Duration):
+                    gap_us = int(num_gap * 1_000_000)
+                    is_break = diffs.dt.total_microseconds() > gap_us
+                else:
+                    is_break = diffs > num_gap
 
             is_break_clean = is_break.fill_null(False)
             ep_ids = is_break_clean.cum_sum().to_numpy().astype(np.int32)
@@ -120,9 +170,27 @@ class SeqSM:
         self._chain.fit_from_arrays(states, episode_ids=ep_ids, n_states=self._encoder.n_states)
         return self
 
-    def partial_fit(self, df: pl.DataFrame | pl.LazyFrame) -> Self:
-        """Sequential partial fitting update."""
-        return self.fit(df)
+    def partial_fit(
+        self,
+        df: pl.DataFrame | pl.LazyFrame,
+        decay: float = 1.0,
+    ) -> Self:
+        """Sequential partial fitting update with concept-drift count decay gamma in (0, 1]."""
+        if self._encoder is None or self._chain is None:
+            return self.fit(df)
+
+        frame = df.collect() if isinstance(df, pl.LazyFrame) else df
+        self._encoder.partial_fit(frame)
+        states = self._encoder.transform(frame)
+        ep_ids = self._resolve_episodes(frame)
+
+        self._chain.partial_fit_from_arrays(
+            states,
+            episode_ids=ep_ids,
+            n_states=self._encoder.n_states,
+            decay=decay,
+        )
+        return self
 
     def predict_proba(
         self,
@@ -133,9 +201,12 @@ class SeqSM:
         if self._chain is None or self._encoder is None:
             raise ValueError("SeqSM has not been fitted.")
 
+        mu = self._chain.marginal_stationary_distribution()
+
         if history is None:
-            # Fallback to marginal distribution
-            return self._chain.marginal_stationary_distribution()
+            if steps == 1:
+                return mu
+            return np.tile(mu, (steps, 1))
 
         if isinstance(history, pl.DataFrame):
             hist_states = self._encoder.transform(history)
@@ -143,12 +214,16 @@ class SeqSM:
             hist_states = np.asarray(history, dtype=np.int32)
 
         if len(hist_states) < self.k:
-            return self._chain.marginal_stationary_distribution()
+            if steps == 1:
+                return mu
+            return np.tile(mu, (steps, 1))
 
         win = tuple(int(x) for x in hist_states[-self.k :])
         u = self._chain.encoder.encode_window(win)
         if u < 0:
-            return self._chain.marginal_stationary_distribution()
+            if steps == 1:
+                return mu
+            return np.tile(mu, (steps, 1))
 
         if steps == 1:
             return self._chain.predict_proba_window(u)
@@ -165,13 +240,23 @@ class SeqSM:
             raise ValueError("SeqSM has not been fitted.")
 
         probs = self.predict_proba(history=history, steps=steps)
-        if method == "map":
-            chosen_state = int(np.argmax(probs))
-        else:
-            rng = np.random.default_rng(self.seed)
-            chosen_state = int(rng.choice(len(probs), p=probs))
+        rng = np.random.default_rng(self.seed)
 
-        return self._encoder.inverse_transform([chosen_state])
+        if probs.ndim == 1:
+            if method == "map":
+                chosen_states = [int(np.argmax(probs))]
+            else:
+                chosen_states = [int(rng.choice(len(probs), p=probs))]
+        else:
+            chosen_states = []
+            for h in range(len(probs)):
+                row = probs[h]
+                if method == "map":
+                    chosen_states.append(int(np.argmax(row)))
+                else:
+                    chosen_states.append(int(rng.choice(len(row), p=row)))
+
+        return self._encoder.inverse_transform(chosen_states)
 
     def generate_schedule(
         self,
@@ -197,17 +282,7 @@ class SeqSM:
             raise ValueError("SeqSM has not been fitted.")
 
         # Resolve time_unit delta
-        if isinstance(time_unit, str):
-            if time_unit.endswith("m"):
-                step_delta = timedelta(minutes=int(time_unit[:-1]))
-            elif time_unit.endswith("s"):
-                step_delta = timedelta(seconds=int(time_unit[:-1]))
-            elif time_unit.endswith("h"):
-                step_delta = timedelta(hours=int(time_unit[:-1]))
-            else:
-                step_delta = timedelta(minutes=1)
-        else:
-            step_delta = time_unit
+        step_delta = parse_duration(time_unit)
 
         # Resolve total step count
         base_time = start_time if start_time is not None else datetime(2026, 1, 1, 0, 0, 0)

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 import numba as nb
 import numpy as np
 from numpy.typing import NDArray
@@ -25,9 +27,9 @@ def count_transitions_njit(
     return counts
 
 
-@nb.njit(nb.float64[:, :](nb.int64[:, :], nb.float64), nogil=True, cache=True)
+@nb.njit(nogil=True, cache=True)
 def compute_transition_probs_njit(
-    counts: NDArray[np.int64],
+    counts: NDArray[Any],
     alpha: float,
 ) -> NDArray[np.float64]:
     """Computes row-stochastic transition probabilities with optional Lidstone smoothing."""
@@ -92,18 +94,12 @@ def rle_collapse_njit(
     return out_states, out_dwells, out_episodes
 
 
-@nb.njit(
-    nb.types.Tuple((nb.int32[:], nb.int32[:], nb.float64[:], nb.float64[:]))(
-        nb.float64[:, :], nb.int64[:, :], nb.float64, nb.int64
-    ),
-    nogil=True,
-    cache=True,
-)
+@nb.njit(nogil=True, cache=True)
 def build_valid_arc_csr_njit(
     probs: NDArray[np.float64],
-    counts: NDArray[np.int64],
+    counts: NDArray[Any],
     min_prob: float,
-    min_count: int,
+    min_count: float,
 ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.float64], NDArray[np.float64]]:
     """Builds a CSR representation of valid-arc transition probabilities and cumulative distribution."""
     n_sources, n_targets = probs.shape

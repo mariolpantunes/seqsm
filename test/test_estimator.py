@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 
 import polars as pl
 
-from seqsm.estimator import SeqSM
+from seqsm.estimator import SeqSM, parse_duration
 
 
 class TestEstimator(unittest.TestCase):
@@ -78,7 +78,7 @@ class TestEstimator(unittest.TestCase):
 
         # Multi-step proba and history as DataFrame
         proba_df_hist = model.predict_proba(history=self.df.head(2), steps=2)
-        self.assertEqual(len(proba_df_hist), model.state_encoder.n_states)
+        self.assertEqual(proba_df_hist.shape, (2, model.state_encoder.n_states))
 
         # History with unseen sequence falls back to marginal
         unseen_df = pl.DataFrame({"motion": [99], "light": ["unknown"]})
@@ -88,6 +88,80 @@ class TestEstimator(unittest.TestCase):
         # Predict with sample method
         pred_sample = model.predict(steps=1, method="sample")
         self.assertEqual(len(pred_sample), 1)
+
+    def test_partial_fit_incremental_and_decay_c2(self) -> None:
+        # Fitting batch 1 then batch 2 with decay=1.0 should accumulate counts
+        batch1 = self.df.head(3)
+        batch2 = self.df.tail(2)
+
+        m_inc = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.0)
+        m_inc.fit(batch1)
+        c1 = m_inc.markov_chain.count_matrix.copy()
+
+        m_inc.partial_fit(batch2, decay=1.0)
+        c_inc = m_inc.markov_chain.count_matrix
+
+        # Total counts in incremental should be greater than batch 1 alone
+        self.assertGreater(float(c_inc.sum()), float(c1.sum()))
+
+        # Test decay < 1.0 discounts prior counts
+        m_decay = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.0)
+        m_decay.fit(batch1)
+        m_decay.partial_fit(batch2, decay=0.5)
+        c_decay = m_decay.markov_chain.count_matrix
+        self.assertLess(float(c_decay.sum()), float(c_inc.sum()))
+
+    def test_predict_multi_step_decoding_c3(self) -> None:
+        model = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.1)
+        model.fit(self.df)
+
+        pred_3_map = model.predict(steps=3, method="map")
+        self.assertEqual(len(pred_3_map), 3)
+        self.assertIn("motion", pred_3_map.columns)
+        self.assertIn("light", pred_3_map.columns)
+
+        pred_3_sample = model.predict(steps=3, method="sample")
+        self.assertEqual(len(pred_3_sample), 3)
+
+    def test_duration_parsing_units_and_errors_h6(self) -> None:
+        self.assertEqual(parse_duration("1d"), timedelta(days=1))
+        self.assertEqual(parse_duration("12h"), timedelta(hours=12))
+        self.assertEqual(parse_duration("30m"), timedelta(minutes=30))
+        self.assertEqual(parse_duration("15s"), timedelta(seconds=15))
+        self.assertEqual(parse_duration("500ms"), timedelta(milliseconds=500))
+        self.assertEqual(parse_duration("10us"), timedelta(microseconds=10))
+        self.assertEqual(parse_duration("2w"), timedelta(weeks=2))
+        self.assertEqual(parse_duration(timedelta(minutes=5)), timedelta(minutes=5))
+
+        with self.assertRaises(ValueError):
+            parse_duration("invalid_duration")
+        with self.assertRaises(ValueError):
+            parse_duration("")
+        with self.assertRaises(TypeError):
+            parse_duration(123)  # type: ignore[arg-type]
+
+    def test_resolve_episodes_string_and_numeric_h4(self) -> None:
+        # String episode labels
+        df_str = pl.DataFrame(
+            {
+                "motion": [0, 1, 0, 1],
+                "ep": ["morning", "morning", "evening", "evening"],
+            }
+        )
+        model = SeqSM(k=1, episode_col="ep", feature_cols=["motion"])
+        model.fit(df_str)
+        self.assertEqual(model.markov_chain.k, 1)
+
+        # Max time gap as string duration
+        df_gap = pl.DataFrame(
+            {
+                "timestamp": [datetime(2026, 1, 1, 8, 0), datetime(2026, 1, 1, 9, 0)],
+                "motion": [0, 1],
+            }
+        )
+        model_gap = SeqSM(k=1, timestamp_col="timestamp", max_time_gap="30m", feature_cols=["motion"])
+        model_gap.fit(df_gap)
+        self.assertEqual(model_gap.markov_chain.k, 1)
 
     def test_generate_schedule_with_init_history(self) -> None:
         model = SeqSM(k=1, feature_cols=["motion", "light"])

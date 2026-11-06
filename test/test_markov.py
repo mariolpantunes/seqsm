@@ -93,7 +93,9 @@ class TestMarkovChain(unittest.TestCase):
 
         # Step 2 should cycle back to state 0
         p2 = chain.multi_step_distribution(0, steps=2)
-        np.testing.assert_allclose(p2, [1.0, 0.0])
+        self.assertEqual(p2.shape, (2, 2))
+        np.testing.assert_allclose(p2[0], [0.0, 1.0])
+        np.testing.assert_allclose(p2[1], [1.0, 0.0])
 
         with self.assertRaises(ValueError):
             chain.multi_step_distribution(0, steps=0)
@@ -128,11 +130,12 @@ class TestMarkovChain(unittest.TestCase):
 
         # Multi-step distribution vs brute force 2-step
         dist_2step = chain.multi_step_distribution(source_id=0, steps=2)
-        self.assertAlmostEqual(float(np.sum(dist_2step)), 1.0)
+        self.assertEqual(dist_2step.shape, (2, chain.n_states))
+        np.testing.assert_allclose(dist_2step.sum(axis=1), [1.0, 1.0], atol=1e-12)
         p_tilde = chain.companion_matrix()
         p_rect = chain.transition_matrix
         brute_2step = p_tilde[0, :] @ p_rect
-        np.testing.assert_allclose(dist_2step, brute_2step, atol=1e-12)
+        np.testing.assert_allclose(dist_2step[1], brute_2step, atol=1e-12)
 
     def test_event_mode_preserves_episode_boundaries_c6(self) -> None:
         chain = KOrderMarkovChain(k=2, mode="event", smoothing=0.0)
@@ -179,7 +182,8 @@ class TestMarkovChain(unittest.TestCase):
         np.testing.assert_allclose(d1, p1)
 
         d3 = chain.multi_step_distribution(0, 3)
-        self.assertAlmostEqual(float(np.sum(d3)), 1.0)
+        self.assertEqual(d3.shape, (3, chain.n_states))
+        np.testing.assert_allclose(d3.sum(axis=1), [1.0, 1.0, 1.0])
 
 
 class TestVariableOrderMarkovChain(unittest.TestCase):
