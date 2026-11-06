@@ -1,6 +1,7 @@
 """seqsm: Sequential State Machines and K-order Markov chains."""
 
 from seqsm.encoding import KWindowEncoder, StateEncoder
+from seqsm.markov import KOrderMarkovChain, VariableOrderMarkovChain
 from seqsm.types import (
     DwellDistribution,
     RoutineCycle,
@@ -12,9 +13,11 @@ __version__ = "0.1.0"
 
 __all__ = [
     "DwellDistribution",
+    "KOrderMarkovChain",
     "KWindowEncoder",
     "RoutineCycle",
     "ScheduleConstraints",
     "ScheduleTrajectory",
     "StateEncoder",
+    "VariableOrderMarkovChain",
 ]
