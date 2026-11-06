@@ -160,6 +160,51 @@ class TestSchedule(unittest.TestCase):
         with self.assertRaises(ValueError):
             gen.generate(n_steps=3, init_history=np.array([0], dtype=np.int32))
 
+    def test_mandatory_deadlines_event_mode_dwell_clamping_n1(self) -> None:
+        # Event mode chain with multi-step dwell times
+        chain = KOrderMarkovChain(k=1, mode="event")
+        # State 0 dwells for 5, transitions to 1; State 1 dwells for 5, transitions to 2; State 2 dwells for 5
+        seq = np.array([0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2], dtype=np.int32)
+        chain.fit_from_arrays(seq)
+        gen = ScheduleGenerator(chain, self.encoder)
+
+        # Mandatory state 1 with deadline at step 3 (smaller than standard dwell 5 of state 0)
+        constraints = ScheduleConstraints(initial_state=0, mandatory_states=[(1, (1, 3))])
+        traj = gen.generate(n_steps=10, constraints=constraints, method="constrained", seed=42)
+
+        # In constrained mode, state 0 dwell should be clamped to 3, allowing state 1 on time
+        self.assertIn(1, traj.state_ids)
+        self.assertEqual(traj.unmet_mandatory, ())
+
+    def test_mandatory_deadlines_missed_flags_violation_n1(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        # Sequence only transitions between 0 and 1; state 2 has zero incoming transitions
+        seq = np.array([0, 1, 0, 1], dtype=np.int32)
+        chain.fit_from_arrays(seq, n_states=3)
+        gen = ScheduleGenerator(chain, self.encoder)
+
+        # Mandatory state 2 with deadline at step 1 is unreachable
+        constraints = ScheduleConstraints(initial_state=0, mandatory_states=[(2, 1)])
+        traj = gen.generate(n_steps=5, constraints=constraints, method="constrained", seed=42)
+
+        # The unreachable mandatory deadline must trigger violation and report in unmet_mandatory
+        self.assertTrue(any(traj.constraint_violated))
+        self.assertIn(2, traj.unmet_mandatory)
+
+    def test_multi_mandatory_deadlines_concurrent_n1(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        seq = np.array([0, 1, 0, 2, 0, 1, 0, 2], dtype=np.int32)
+        chain.fit_from_arrays(seq)
+        gen = ScheduleGenerator(chain, self.encoder)
+
+        # Both state 1 and state 2 mandatory with deadline at step 1 (impossible to visit both simultaneously)
+        constraints = ScheduleConstraints(initial_state=0, mandatory_states=[(1, 1), (2, 1)])
+        traj = gen.generate(n_steps=4, constraints=constraints, method="constrained", seed=42)
+
+        # Since only one state can be visited at step 1, the other deadline will be unmet/violated
+        self.assertTrue(any(traj.constraint_violated))
+        self.assertTrue(len(traj.unmet_mandatory) >= 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -172,21 +172,28 @@ class ScheduleGenerator:
             constraint_violated = False
             rem_steps = n_steps - total_steps
 
-            # Check urgent mandatory checkpoint at current step
-            urgent_mandatory = [
-                ms_sid
-                for m_idx, (ms_sid, _, t_max) in enumerate(mandatory)
-                if not mandatory_satisfied[m_idx] and total_steps == t_max
-            ]
+            # Check urgent mandatory checkpoints (due or overdue)
+            urgent_mandatory_set = {
+                mandatory[m_idx][0]
+                for m_idx, (_, _, t_max) in enumerate(mandatory)
+                if not mandatory_satisfied[m_idx] and total_steps >= t_max
+            }
 
             # 1. Enforce terminal state if at final step
             if term_state is not None and rem_steps == 1 and any(v == term_state for v, _ in cands):
                 next_v = term_state
                 next_p = next(p for v, p in cands if v == term_state)
             # 2. Enforce urgent mandatory checkpoint
-            elif urgent_mandatory and any(v == urgent_mandatory[0] for v, _ in cands):
-                next_v = urgent_mandatory[0]
-                next_p = next(p for v, p in cands if v == next_v)
+            elif urgent_mandatory_set and any(v in urgent_mandatory_set for v, _ in cands):
+                urgent_cands = [item for item in cands if item[0] in urgent_mandatory_set]
+                denom = sum(p for _, p in urgent_cands)
+                norm_probs = [p / denom for _, p in urgent_cands]
+                if method in ("map", "constrained"):
+                    best_idx = int(np.argmax(norm_probs))
+                    next_v, next_p = urgent_cands[best_idx]
+                else:
+                    chosen_idx = int(rng.choice(len(urgent_cands), p=norm_probs))
+                    next_v, next_p = urgent_cands[chosen_idx]
             elif cands:
                 # In constrained mode, prioritize active mandatory state visits
                 active_mandatory = {
@@ -226,12 +233,7 @@ class ScheduleGenerator:
                 is_valid = False
                 constraint_violated = True
 
-            # Mark satisfied mandatory checkpoints
-            for m_idx, (ms_sid, t_min, t_max) in enumerate(mandatory):
-                if not mandatory_satisfied[m_idx] and next_v == ms_sid and t_min <= total_steps <= t_max:
-                    mandatory_satisfied[m_idx] = True
-
-            # Dwell duration resolution & clamping (H5 & M5)
+            # Dwell duration resolution & clamping (H5, M5, N1)
             rem = n_steps - total_steps
             if self._chain.mode == "event":
                 if next_v in dwell_stats and len(dwell_stats[next_v].samples) > 0:
@@ -240,11 +242,40 @@ class ScheduleGenerator:
                 else:
                     dwell = 1
                 dwell = max(1, min(dwell, rem))
-                total_steps += dwell
+
+                # Clamping in constrained mode to avoid leaping over upcoming mandatory deadlines
+                if method == "constrained":
+                    pending_deadlines = [
+                        t_max
+                        for m_idx, (_, _, t_max) in enumerate(mandatory)
+                        if not mandatory_satisfied[m_idx] and t_max > total_steps
+                    ]
+                    if pending_deadlines:
+                        earliest_deadline = min(pending_deadlines)
+                        time_to_earliest = earliest_deadline - total_steps
+                        if time_to_earliest >= 1 and not any(
+                            mandatory[m_idx][0] == next_v
+                            for m_idx in range(len(mandatory))
+                            if not mandatory_satisfied[m_idx] and mandatory[m_idx][2] == earliest_deadline
+                        ):
+                            dwell = max(1, min(dwell, time_to_earliest))
             else:
                 dwell = 1
-                total_steps += 1
 
+            # Mark satisfied mandatory checkpoints and flag missed deadlines
+            for m_idx, (ms_sid, t_min, t_max) in enumerate(mandatory):
+                if not mandatory_satisfied[m_idx]:
+                    if next_v == ms_sid:
+                        if total_steps <= t_max and (total_steps + dwell) > t_min:
+                            mandatory_satisfied[m_idx] = True
+                        elif total_steps > t_max:
+                            constraint_violated = True
+                            mandatory_satisfied[m_idx] = True
+                    else:
+                        if total_steps >= t_max or (total_steps + dwell) > t_max:
+                            constraint_violated = True
+
+            total_steps += dwell
             state_dwell_spent[next_v] = state_dwell_spent.get(next_v, 0) + dwell
             out_states.append(next_v)
             out_dwells.append(dwell)
@@ -256,12 +287,19 @@ class ScheduleGenerator:
             curr_window.append(next_v)
             curr_u = self._hierarchical_backoff(curr_window, pi)
 
+        unmet_mandatory = tuple(
+            ms_sid for m_idx, (ms_sid, _, _) in enumerate(mandatory) if not mandatory_satisfied[m_idx]
+        )
+        if unmet_mandatory and out_violated:
+            out_violated[-1] = True
+
         return ScheduleTrajectory(
             state_ids=tuple(out_states),
             dwell_durations=tuple(out_dwells),
             transition_probs=tuple(out_probs),
             arc_valid=tuple(out_valids),
             constraint_violated=tuple(out_violated),
+            unmet_mandatory=unmet_mandatory,
         )
 
 

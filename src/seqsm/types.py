@@ -76,6 +76,7 @@ class ScheduleTrajectory:
     transition_probs: tuple[float, ...]
     arc_valid: tuple[bool, ...]
     constraint_violated: tuple[bool, ...] = field(default_factory=tuple)
+    unmet_mandatory: tuple[int, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

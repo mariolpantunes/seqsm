@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+import pickle
 import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from seqsm.estimator import SeqSM
@@ -67,60 +70,71 @@ class TestIO(unittest.TestCase):
                 load_model(trunc_path)
 
     def test_load_model_version_mismatch(self) -> None:
-        import pickle
-
         with tempfile.TemporaryDirectory() as tmp_dir:
-            mismatch_path = Path(tmp_dir) / "mismatch.pkl"
-            payload = {
-                "format": "seqsm",
-                "version": "99.99.99",
-                "model": self.model,
-            }
-            with open(mismatch_path, "wb") as f:
-                pickle.dump(payload, f)
+            orig_path = Path(tmp_dir) / "orig.npz"
+            save_model(self.model, orig_path)
+
+            mismatch_path = Path(tmp_dir) / "mismatch.npz"
+            with np.load(orig_path, allow_pickle=False) as data:
+                save_dict = {key: data[key] for key in data.files}
+                meta = json.loads(data["metadata_bytes"].tobytes().decode("utf-8"))
+                meta["version"] = "99.99.99"
+                save_dict["metadata_bytes"] = np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8)
+                np.savez_compressed(mismatch_path, **save_dict)
 
             with self.assertRaises(ValueError) as ctx:
                 load_model(mismatch_path)
             self.assertIn("Version mismatch", str(ctx.exception))
 
     def test_load_model_patch_version_compatible_r18(self) -> None:
-        import pickle
-
         with tempfile.TemporaryDirectory() as tmp_dir:
-            compat_path = Path(tmp_dir) / "compat.pkl"
-            payload = {
-                "format": "seqsm",
-                "version": "0.1.99",
-                "model": self.model,
-            }
-            with open(compat_path, "wb") as f:
-                pickle.dump(payload, f)
+            orig_path = Path(tmp_dir) / "orig.npz"
+            save_model(self.model, orig_path)
+
+            compat_path = Path(tmp_dir) / "compat.npz"
+            with np.load(orig_path, allow_pickle=False) as data:
+                save_dict = {key: data[key] for key in data.files}
+                meta = json.loads(data["metadata_bytes"].tobytes().decode("utf-8"))
+                meta["version"] = "0.1.99"
+                save_dict["metadata_bytes"] = np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8)
+                np.savez_compressed(compat_path, **save_dict)
 
             loaded = load_model(compat_path)
             self.assertIsInstance(loaded, SeqSM)
 
     def test_load_model_invalid_format(self) -> None:
-        import pickle
-
         with tempfile.TemporaryDirectory() as tmp_dir:
-            invalid_path = Path(tmp_dir) / "invalid.pkl"
-            # Bare pickle or missing format key
-            with open(invalid_path, "wb") as f:
-                pickle.dump({"random": 123}, f)
+            invalid_path = Path(tmp_dir) / "invalid.npz"
+            np.savez_compressed(invalid_path, random_data=np.array([1, 2, 3]))
 
             with self.assertRaises(ValueError):
                 load_model(invalid_path)
 
     def test_load_model_non_model_payload_type_error(self) -> None:
-        import pickle
-
         with tempfile.TemporaryDirectory() as tmp_dir:
-            invalid_path = Path(tmp_dir) / "invalid_type.pkl"
-            with open(invalid_path, "wb") as f:
-                pickle.dump({"format": "seqsm", "version": "0.1.0", "model": 123}, f)
+            orig_path = Path(tmp_dir) / "orig.npz"
+            save_model(self.model, orig_path)
+
+            invalid_path = Path(tmp_dir) / "invalid_type.npz"
+            with np.load(orig_path, allow_pickle=False) as data:
+                save_dict = {key: data[key] for key in data.files}
+                meta = json.loads(data["metadata_bytes"].tobytes().decode("utf-8"))
+                meta["estimator_params"] = 123  # Not a dict
+                save_dict["metadata_bytes"] = np.frombuffer(json.dumps(meta).encode("utf-8"), dtype=np.uint8)
+                np.savez_compressed(invalid_path, **save_dict)
 
             with self.assertRaises(TypeError):
                 load_model(invalid_path)
+
+    def test_load_model_rejects_pickle_exploit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            malicious_path = Path(tmp_dir) / "malicious.pkl"
+            with open(malicious_path, "wb") as f:
+                pickle.dump({"format": "seqsm", "version": "0.1.0"}, f)
+
+            with self.assertRaises(ValueError) as ctx:
+                load_model(malicious_path)
+            self.assertIn("Corrupted or invalid", str(ctx.exception))
 
     def test_export_schedule_parquet(self) -> None:
         sched = self.model.generate_schedule(window=5, seed=1)
