@@ -1,7 +1,12 @@
 """seqsm: Sequential State Machines and K-order Markov chains."""
 
 from seqsm.encoding import KWindowEncoder, StateEncoder
+from seqsm.estimator import SeqSM
+from seqsm.io import export_schedule_parquet, load_model, save_model
+from seqsm.machine import StateMachine
 from seqsm.markov import KOrderMarkovChain, VariableOrderMarkovChain
+from seqsm.motifs import compare_chains, score_anomalies
+from seqsm.schedule import ScheduleGenerator
 from seqsm.types import (
     DwellDistribution,
     RoutineCycle,
@@ -17,7 +22,15 @@ __all__ = [
     "KWindowEncoder",
     "RoutineCycle",
     "ScheduleConstraints",
+    "ScheduleGenerator",
     "ScheduleTrajectory",
+    "SeqSM",
     "StateEncoder",
+    "StateMachine",
     "VariableOrderMarkovChain",
+    "compare_chains",
+    "export_schedule_parquet",
+    "load_model",
+    "save_model",
+    "score_anomalies",
 ]
