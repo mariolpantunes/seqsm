@@ -1,0 +1,57 @@
+name: CI
+
+# The CI gate. `.pre-commit-config.yaml` runs the same steps at commit time; if
+# one changes, the other changes in the same commit. Tool versions come from
+# pyproject.toml's dependency groups (`lint`, `test`). Runner images are pinned
+# (not `*-latest`), so a label migration never changes the gate silently.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v7.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: "pip"
+
+      - name: Set up virtualenv and install dependencies
+        run: |
+          python -m venv venv
+          venv/bin/pip install -q --upgrade pip
+          venv/bin/pip install -q --group lint
+          venv/bin/pip install -q . --group test
+
+      - name: Lint with Ruff
+        run: venv/bin/ruff check src test examples
+
+      - name: Format check with Ruff
+        run: venv/bin/ruff format --check src test examples
+
+      - name: Type-check with basedpyright
+        run: venv/bin/basedpyright
+
+      - name: Dead code with Vulture
+        run: venv/bin/vulture
+
+      - name: Run tests with coverage
+        env:
+          PYTHONPATH: src
+        run: |
+          venv/bin/python -m coverage run --source=seqsm -m unittest discover -s test
+          venv/bin/python -m coverage report -m --fail-under=85
