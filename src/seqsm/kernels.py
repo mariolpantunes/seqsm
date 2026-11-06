@@ -100,6 +100,56 @@ def rle_collapse_njit(
     return out_states, out_dwells, out_episodes
 
 
+@nb.njit(
+    nb.types.Tuple((nb.int32[:], nb.int32[:], nb.int32[:]))(nb.int32[:], nb.int32[:], nb.int32[:]),
+    nogil=True,
+    cache=True,
+)
+def rle_collapse_with_dwells_njit(
+    states: NDArray[np.int32],
+    dwells: NDArray[np.int32],
+    episodes: NDArray[np.int32],
+) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.int32]]:
+    """
+    Collapses consecutive identical states and sums their caller-supplied dwell times.
+    """
+    n = len(states)
+    if n == 0:
+        return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+    n_runs = 1
+    for i in range(1, n):
+        if states[i] != states[i - 1] or (len(episodes) > 0 and episodes[i] != episodes[i - 1]):
+            n_runs += 1
+
+    out_states = np.empty(n_runs, dtype=np.int32)
+    out_dwells = np.empty(n_runs, dtype=np.int32)
+    out_episodes = np.empty(n_runs, dtype=np.int32)
+
+    run_idx = 0
+    cur_state = states[0]
+    cur_ep = episodes[0] if len(episodes) > 0 else 0
+    cur_dwell = dwells[0]
+
+    for i in range(1, n):
+        ep = episodes[i] if len(episodes) > 0 else 0
+        if states[i] != cur_state or ep != cur_ep:
+            out_states[run_idx] = cur_state
+            out_dwells[run_idx] = cur_dwell
+            out_episodes[run_idx] = cur_ep
+            run_idx += 1
+            cur_state = states[i]
+            cur_ep = ep
+            cur_dwell = dwells[i]
+        else:
+            cur_dwell += dwells[i]
+
+    out_states[run_idx] = cur_state
+    out_dwells[run_idx] = cur_dwell
+    out_episodes[run_idx] = cur_ep
+    return out_states, out_dwells, out_episodes
+
+
 @nb.njit(nogil=True, cache=True)
 def build_valid_arc_csr_njit(
     probs: NDArray[np.float64],

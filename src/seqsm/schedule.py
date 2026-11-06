@@ -35,6 +35,16 @@ class ScheduleGenerator:
             probs, counts, min_prob, min_count
         )
 
+        # Precompute suffix mapping for O(1) hierarchical context backoff
+        self._suffix_map: dict[tuple[int, ...], list[int]] = {}
+        k_enc = chain.encoder
+        k = chain.k
+        for u in range(k_enc.n_windows):
+            win = k_enc.decode_window(u)
+            for suf_len in range(1, k):
+                suf = win[-suf_len:]
+                self._suffix_map.setdefault(suf, []).append(u)
+
     def _resolve_state(self, state: int | dict[str, Any] | None) -> int | None:
         """Resolves an integer state ID from int or feature dictionary."""
         if state is None:
@@ -55,15 +65,13 @@ class ScheduleGenerator:
             if u >= 0:
                 return u
 
-        k_tuples = k_enc.k_tuples
-        n_win = k_enc.n_windows
         for suf_len in range(min(k - 1, len(target_window)), 0, -1):
             suf = tuple(int(x) for x in target_window[-suf_len:])
-            matching = [idx for idx in range(n_win) if tuple(k_tuples[idx, -suf_len:]) == suf]
+            matching = self._suffix_map.get(suf)
             if matching:
                 return max(matching, key=lambda idx: float(pi[idx]))
 
-        if n_win > 0:
+        if k_enc.n_windows > 0:
             return int(np.argmax(pi))
         return 0
 
@@ -93,6 +101,7 @@ class ScheduleGenerator:
         forbidden: set[int] = set()
         max_dwell: dict[int, int] = {}
         term_state: int | None = None
+        mandatory: list[tuple[int, int, int]] = []
         if constraints is not None:
             for fs in constraints.forbidden_states:
                 sid = self._resolve_state(fs)
@@ -101,6 +110,14 @@ class ScheduleGenerator:
             if constraints.max_total_dwell is not None:
                 max_dwell = dict(constraints.max_total_dwell)
             term_state = self._resolve_state(constraints.terminal_state)
+            for ms, time_spec in constraints.mandatory_states:
+                sid = self._resolve_state(ms)
+                if sid is not None and sid >= 0:
+                    if isinstance(time_spec, (int, np.integer)):
+                        mandatory.append((sid, int(time_spec), int(time_spec)))
+                    elif isinstance(time_spec, (tuple, list)) and len(time_spec) == 2:
+                        mandatory.append((sid, int(time_spec[0]), int(time_spec[1])))
+        mandatory_satisfied = [False] * len(mandatory)
 
         # 1. Resolve initial state / history
         if init_history is not None:
@@ -129,6 +146,7 @@ class ScheduleGenerator:
         out_dwells: list[int] = []
         out_probs: list[float] = []
         out_valids: list[bool] = []
+        out_violated: list[bool] = []
 
         total_steps = 0
         dwell_stats = self._chain.dwell_stats
@@ -151,22 +169,47 @@ class ScheduleGenerator:
                     cands.append((v, p))
 
             is_valid = True
+            constraint_violated = False
             rem_steps = n_steps - total_steps
+
+            # Check urgent mandatory checkpoint at current step
+            urgent_mandatory = [
+                ms_sid
+                for m_idx, (ms_sid, _, t_max) in enumerate(mandatory)
+                if not mandatory_satisfied[m_idx] and total_steps == t_max
+            ]
+
+            # 1. Enforce terminal state if at final step
             if term_state is not None and rem_steps == 1 and any(v == term_state for v, _ in cands):
                 next_v = term_state
                 next_p = next(p for v, p in cands if v == term_state)
+            # 2. Enforce urgent mandatory checkpoint
+            elif urgent_mandatory and any(v == urgent_mandatory[0] for v, _ in cands):
+                next_v = urgent_mandatory[0]
+                next_p = next(p for v, p in cands if v == next_v)
             elif cands:
-                denom = sum(p for _, p in cands)
-                norm_probs = [p / denom for _, p in cands]
-                if method == "map":
+                # In constrained mode, prioritize active mandatory state visits
+                active_mandatory = {
+                    ms_sid
+                    for m_idx, (ms_sid, t_min, t_max) in enumerate(mandatory)
+                    if not mandatory_satisfied[m_idx] and t_min <= total_steps <= t_max
+                }
+                preferred_cands = [item for item in cands if item[0] in active_mandatory]
+                target_cands = preferred_cands if (method == "constrained" and preferred_cands) else cands
+
+                denom = sum(p for _, p in target_cands)
+                norm_probs = [p / denom for _, p in target_cands]
+                if method in ("map", "constrained"):
                     best_idx = int(np.argmax(norm_probs))
-                    next_v, next_p = cands[best_idx]
+                    next_v, next_p = target_cands[best_idx]
                 else:
-                    chosen_idx = int(rng.choice(len(cands), p=norm_probs))
-                    next_v, next_p = cands[chosen_idx]
+                    chosen_idx = int(rng.choice(len(target_cands), p=norm_probs))
+                    next_v, next_p = target_cands[chosen_idx]
             elif n_arcs > 0:
                 # Relax constraints if all filtered out
-                if method == "map":
+                constraint_violated = True
+                is_valid = False
+                if method in ("map", "constrained"):
                     best_rel = int(np.argmax(self._filtered_probs[start_arc:end_arc]))
                     next_v = int(self._indices[start_arc + best_rel])
                     next_p = float(self._filtered_probs[start_arc + best_rel])
@@ -181,6 +224,12 @@ class ScheduleGenerator:
                 next_v = int(np.argmax(self._chain.transition_matrix[curr_u]))
                 next_p = float(self._chain.transition_matrix[curr_u, next_v])
                 is_valid = False
+                constraint_violated = True
+
+            # Mark satisfied mandatory checkpoints
+            for m_idx, (ms_sid, t_min, t_max) in enumerate(mandatory):
+                if not mandatory_satisfied[m_idx] and next_v == ms_sid and t_min <= total_steps <= t_max:
+                    mandatory_satisfied[m_idx] = True
 
             # Dwell duration resolution & clamping (H5 & M5)
             rem = n_steps - total_steps
@@ -201,6 +250,7 @@ class ScheduleGenerator:
             out_dwells.append(dwell)
             out_probs.append(next_p)
             out_valids.append(is_valid)
+            out_violated.append(constraint_violated)
 
             # Update window & hierarchical context backoff (C4)
             curr_window.append(next_v)
@@ -211,6 +261,7 @@ class ScheduleGenerator:
             dwell_durations=tuple(out_dwells),
             transition_probs=tuple(out_probs),
             arc_valid=tuple(out_valids),
+            constraint_violated=tuple(out_violated),
         )
 
 

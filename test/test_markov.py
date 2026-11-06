@@ -293,6 +293,98 @@ class TestVariableOrderMarkovChain(unittest.TestCase):
         with self.assertRaises(ValueError):
             vom.predict_proba([3])
 
+    def test_tuned_backoff_ctw_ppmc_blending_r2(self) -> None:
+        states = np.array([0, 1, 2, 0, 1, 3, 0, 1, 2], dtype=np.int32)
+        vom_tuned = VariableOrderMarkovChain(max_k=2, backoff="tuned")
+        vom_tuned.fit_from_arrays(states)
+
+        vom_wb = VariableOrderMarkovChain(max_k=2, backoff="witten_bell")
+        vom_wb.fit_from_arrays(states)
+
+        p_tuned = vom_tuned.predict_proba([0, 1])
+        self.assertAlmostEqual(float(np.sum(p_tuned)), 1.0)
+        p_wb = vom_wb.predict_proba([0, 1])
+        self.assertAlmostEqual(float(np.sum(p_wb)), 1.0)
+
+        # On an unseen 2-window with observed 1-window
+        p_unseen_tuned = vom_tuned.predict_proba([3, 1])
+        p_unseen_wb = vom_wb.predict_proba([3, 1])
+        self.assertAlmostEqual(float(np.sum(p_unseen_tuned)), 1.0)
+        self.assertAlmostEqual(float(np.sum(p_unseen_wb)), 1.0)
+
+    def test_event_mode_with_caller_dwells_and_uncollapsed_states_r3(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="event")
+        # Uncollapsed states with duplicate runs
+        states = np.array([0, 0, 1, 1, 1, 2, 2], dtype=np.int32)
+        dwells = np.array([2, 3, 1, 4, 1, 5, 2], dtype=np.int32)
+        chain.fit_from_arrays(states, dwell_times=dwells)
+
+        # Runs collapsed: 0 (dwell 2+3=5), 1 (dwell 1+4+1=6), 2 (dwell 5+2=7)
+        self.assertIn(0, chain.dwell_stats)
+        self.assertIn(1, chain.dwell_stats)
+        self.assertIn(2, chain.dwell_stats)
+        self.assertEqual(chain.dwell_stats[0].samples, (5,))
+        self.assertEqual(chain.dwell_stats[1].samples, (6,))
+        self.assertEqual(chain.dwell_stats[2].samples, (7,))
+
+        # Length mismatch raises
+        with self.assertRaises(ValueError):
+            chain.fit_from_arrays(states, dwell_times=np.array([1, 2], dtype=np.int32))
+
+        # Partial fit with dwells
+        chain.partial_fit_from_arrays(np.array([0, 1], dtype=np.int32), dwell_times=np.array([3, 4], dtype=np.int32))
+        self.assertIn(3, chain.dwell_stats[0].samples)
+
+    def test_viterbi_decode_trajectory_r4(self) -> None:
+        chain = KOrderMarkovChain(k=2, smoothing=0.01)
+        # Unfitted chain raises
+        with self.assertRaises(ValueError):
+            chain.decode_viterbi([0, 1], horizon=4)
+
+        states = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=np.int32)
+        chain.fit_from_arrays(states)
+
+        # Horizon <= 0 raises
+        with self.assertRaises(ValueError):
+            chain.decode_viterbi([0, 1], horizon=0)
+
+        # History with unseen window
+        win_path_unseen, state_path_unseen = chain.decode_viterbi([99, 99], horizon=3)
+        self.assertEqual(len(state_path_unseen), 3)
+
+        win_path, state_path = chain.decode_viterbi([0, 1], horizon=4)
+        self.assertEqual(len(win_path), 4)
+        self.assertEqual(len(state_path), 4)
+        # Sequence following (0, 1) is 2, 0, 1, 2
+        np.testing.assert_array_equal(state_path, [2, 0, 1, 2])
+
+    def test_linear_backoff_default_weights(self) -> None:
+        vom = VariableOrderMarkovChain(max_k=2, backoff="linear")
+        states = np.array([0, 1, 0, 1, 2], dtype=np.int32)
+        vom.fit_from_arrays(states)
+        p = vom.predict_proba([0, 1])
+        self.assertAlmostEqual(float(np.sum(p)), 1.0)
+        # History shorter than order
+        p_short = vom.predict_proba([1])
+        self.assertAlmostEqual(float(np.sum(p_short)), 1.0)
+
+    def test_stationary_distribution_caching_r6(self) -> None:
+        chain = KOrderMarkovChain(k=1)
+        chain.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))
+
+        pi1 = chain.stationary_distribution()
+        pi2 = chain.stationary_distribution()
+        self.assertIs(pi1, pi2)
+
+        mu1 = chain.marginal_stationary_distribution()
+        mu2 = chain.marginal_stationary_distribution()
+        self.assertIs(mu1, mu2)
+
+        # Refitting clears cache
+        chain.fit_from_arrays(np.array([0, 1, 0, 1], dtype=np.int32))
+        pi3 = chain.stationary_distribution()
+        self.assertIsNot(pi1, pi3)
+
 
 if __name__ == "__main__":
     unittest.main()

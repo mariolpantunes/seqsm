@@ -89,6 +89,51 @@ class TestSchedule(unittest.TestCase):
         count_0 = sum(d for s, d in zip(traj_max.state_ids, traj_max.dwell_durations, strict=False) if s == 0)
         self.assertLessEqual(count_0, 1)
 
+    def test_mandatory_states_and_constrained_method_r1(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        seq = np.array([0, 1, 2, 0, 1, 2, 0, 1, 2], dtype=np.int32)
+        chain.fit_from_arrays(seq)
+        gen = ScheduleGenerator(chain, self.encoder)
+
+        # Mandatory state 2 at step 2
+        constraints = ScheduleConstraints(mandatory_states=[(2, 2)])
+        traj = gen.generate(n_steps=5, constraints=constraints, method="constrained", seed=42)
+        self.assertEqual(traj.state_ids[2], 2)
+        self.assertFalse(any(traj.constraint_violated))
+
+        # Mandatory state with interval (1, 3)
+        constraints_range = ScheduleConstraints(mandatory_states=[(2, (1, 3))])
+        traj_range = gen.generate(n_steps=5, constraints=constraints_range, method="constrained", seed=42)
+        self.assertIn(2, traj_range.state_ids[1:4])
+
+    def test_constraint_relaxation_flag_r5(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        seq = np.array([0, 1, 2, 0, 1, 2], dtype=np.int32)
+        chain.fit_from_arrays(seq)
+        gen = ScheduleGenerator(chain, self.encoder)
+
+        # Forbid all states (0, 1, 2) forcing relaxation
+        constraints_impossible = ScheduleConstraints(forbidden_states=[0, 1, 2])
+        traj = gen.generate(n_steps=4, constraints=constraints_impossible, method="sample", seed=42)
+        self.assertTrue(any(traj.constraint_violated))
+        self.assertFalse(all(traj.arc_valid))
+
+    def test_initial_state_constraint(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        chain.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))
+        gen = ScheduleGenerator(chain, self.encoder)
+        constraints = ScheduleConstraints(initial_state=2)
+        traj = gen.generate(n_steps=3, constraints=constraints, method="map")
+        self.assertEqual(len(traj.state_ids), 3)
+
+    def test_backoff_no_matching_suffix(self) -> None:
+        chain = KOrderMarkovChain(k=2, mode="clock")
+        chain.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))
+        gen = ScheduleGenerator(chain, self.encoder)
+        # History [99, 98] has no matching suffix among windows (0, 1), (1, 2), (2, 0)
+        traj = gen.generate(n_steps=3, init_history=np.array([99, 98], dtype=np.int32), method="map")
+        self.assertEqual(len(traj.state_ids), 3)
+
     def test_init_history_provided(self) -> None:
         chain = KOrderMarkovChain(k=2, mode="clock")
         chain.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))

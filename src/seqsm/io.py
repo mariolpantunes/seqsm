@@ -41,10 +41,14 @@ def load_model(filepath: str | Path) -> SeqSM:
     if not isinstance(payload, dict) or payload.get("format") != "seqsm":
         raise ValueError("Invalid SeqSM model file format.")
 
-    file_version = payload.get("version")
-    if file_version != seqsm.__version__:
+    file_version = str(payload.get("version", ""))
+    curr_version = str(seqsm.__version__)
+    file_major_minor = file_version.split(".")[:2]
+    curr_major_minor = curr_version.split(".")[:2]
+    if file_major_minor != curr_major_minor:
         raise ValueError(
-            f"Version mismatch: model was saved with seqsm {file_version}, current version is {seqsm.__version__}"
+            f"Version mismatch: model was saved with seqsm {file_version}, current version is {seqsm.__version__}. "
+            "Major and minor versions must match for model compatibility."
         )
 
     model = payload.get("model")

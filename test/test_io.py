@@ -83,6 +83,22 @@ class TestIO(unittest.TestCase):
                 load_model(mismatch_path)
             self.assertIn("Version mismatch", str(ctx.exception))
 
+    def test_load_model_patch_version_compatible_r18(self) -> None:
+        import pickle
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            compat_path = Path(tmp_dir) / "compat.pkl"
+            payload = {
+                "format": "seqsm",
+                "version": "0.1.99",
+                "model": self.model,
+            }
+            with open(compat_path, "wb") as f:
+                pickle.dump(payload, f)
+
+            loaded = load_model(compat_path)
+            self.assertIsInstance(loaded, SeqSM)
+
     def test_load_model_invalid_format(self) -> None:
         import pickle
 

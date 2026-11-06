@@ -184,7 +184,7 @@ class StateMachine:
             prob = float(row["probability"])
             adj.setdefault(src, []).append((tgt, prob))
 
-        found_cycles: dict[tuple[int, ...], tuple[float, float]] = {}
+        found_cycles: dict[tuple[int, ...], tuple[float, float, int]] = {}
 
         def dfs(start: int, current: int, path: list[int], prob_prod: float) -> None:
             if len(path) > max_length:
@@ -196,8 +196,8 @@ class StateMachine:
                     # Canonical rotation for cycle equivalence
                     min_idx = int(np.argmin(cycle_tuple))
                     canonical = cycle_tuple[min_idx:] + cycle_tuple[:min_idx]
-                    if canonical not in found_cycles or new_prod > found_cycles[canonical][1]:
-                        found_cycles[canonical] = (float(len(path)), new_prod)
+                    old_len, old_prod, old_count = found_cycles.get(canonical, (float(len(path)), 0.0, 0))
+                    found_cycles[canonical] = (old_len, max(old_prod, new_prod), old_count + 1)
                 elif nxt not in path:
                     dfs(start, nxt, [*path, nxt], new_prod)
 
@@ -209,11 +209,11 @@ class StateMachine:
         return [
             RoutineCycle(
                 state_sequence=cycle_seq,
-                frequency=1,
+                frequency=freq,
                 period=length,
                 persistence=pers,
             )
-            for cycle_seq, (length, pers) in sorted_cycles
+            for cycle_seq, (length, pers, freq) in sorted_cycles
         ]
 
     def to_mermaid(self, diff_labels: bool = True, min_prob: float = 0.05) -> str:

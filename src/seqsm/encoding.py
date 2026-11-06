@@ -106,12 +106,12 @@ class StateEncoder:
 
         selected = frame.select(list(self._feature_cols))
         n_rows = len(selected)
-        out = np.empty(n_rows, dtype=np.int32)
+        if n_rows == 0:
+            return np.empty(0, dtype=np.int32)
 
-        for i, row in enumerate(selected.iter_rows()):
-            out[i] = self._tuple_to_id.get(row, -1)
-
-        return out
+        # Vectorized lookup via Polars left join with vocabulary
+        joined = selected.join(self._vocabulary, on=list(self._feature_cols), how="left")
+        return joined["state_id"].fill_null(-1).to_numpy().astype(np.int32)
 
     def fit_transform(self, df: pl.DataFrame | pl.LazyFrame) -> NDArray[np.int32]:
         """Fits the encoder and transforms the DataFrame in one step."""
@@ -166,6 +166,7 @@ class KWindowEncoder:
         self._k: int = k
         self._window_to_id: dict[tuple[int, ...], int] = {}
         self._id_to_window: dict[int, tuple[int, ...]] = {}
+        self._cached_k_tuples: NDArray[np.int32] | None = None
 
     @property
     def k(self) -> int:
@@ -180,11 +181,13 @@ class KWindowEncoder:
     @property
     def k_tuples(self) -> NDArray[np.int32]:
         """Returns array of shape (N_K, K) containing all observed K-tuples."""
-        n = len(self._id_to_window)
-        out = np.empty((n, self._k), dtype=np.int32)
-        for idx in range(n):
-            out[idx, :] = self._id_to_window[idx]
-        return out
+        if self._cached_k_tuples is None:
+            n = len(self._id_to_window)
+            out = np.empty((n, self._k), dtype=np.int32)
+            for idx in range(n):
+                out[idx, :] = self._id_to_window[idx]
+            self._cached_k_tuples = out
+        return self._cached_k_tuples
 
     def fit_transform(
         self,
@@ -239,6 +242,7 @@ class KWindowEncoder:
         unique_windows = sorted(set(valid_windows))
         self._window_to_id = {win: idx for idx, win in enumerate(unique_windows)}
         self._id_to_window = {idx: win for idx, win in enumerate(unique_windows)}
+        self._cached_k_tuples = None
 
         m = len(source_tuples)
         sources_u = np.empty(m, dtype=np.int32)
@@ -293,6 +297,7 @@ class KWindowEncoder:
                 new_id = len(self._id_to_window)
                 self._window_to_id[win_states] = new_id
                 self._id_to_window[new_id] = win_states
+                self._cached_k_tuples = None
 
             source_tuples.append(win_states)
             target_states.append(target)

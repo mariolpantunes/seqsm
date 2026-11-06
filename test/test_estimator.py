@@ -269,6 +269,41 @@ class TestEstimator(unittest.TestCase):
         period = model.detect_period(self.df)
         self.assertGreaterEqual(period, 1)
 
+    def test_predict_method_viterbi_r4(self) -> None:
+        model = SeqSM(k=1, feature_cols=["motion", "light"])
+        model.fit(self.df)
+        pred_vit = model.predict(steps=3, method="viterbi")
+        self.assertEqual(len(pred_vit), 3)
+        self.assertIn("motion", pred_vit.columns)
+        self.assertIn("light", pred_vit.columns)
+
+    def test_parse_duration_zero_and_compound_r16(self) -> None:
+        from seqsm.estimator import parse_duration
+
+        with self.assertRaises(ValueError) as ctx:
+            parse_duration("0s")
+        self.assertIn("Duration must be strictly positive", str(ctx.exception))
+
+        with self.assertRaises(ValueError) as ctx2:
+            parse_duration("1h30m")
+        self.assertIn("compound strings", str(ctx2.exception))
+
+    def test_generate_schedule_constraint_violated_column_r5(self) -> None:
+        model = SeqSM(k=1, feature_cols=["motion", "light"])
+        model.fit(self.df)
+        sched = model.generate_schedule(window=5, seed=123)
+        self.assertIn("constraint_violated", sched.columns)
+        self.assertIn("arc_valid", sched.columns)
+
+    def test_detect_period_with_timestamp_col_r12(self) -> None:
+        df_ts = self.df.with_columns(
+            pl.datetime_range(datetime(2026, 1, 1), datetime(2026, 1, 1, 4), interval="1h", eager=True).alias("ts")
+        )
+        model = SeqSM(k=1, feature_cols=["motion", "light"], timestamp_col="ts")
+        model.fit(df_ts)
+        period = model.detect_period(df_ts, timestamp_col="ts")
+        self.assertGreaterEqual(period, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

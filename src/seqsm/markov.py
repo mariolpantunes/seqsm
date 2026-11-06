@@ -13,6 +13,7 @@ from seqsm.kernels import (
     compute_transition_probs_njit,
     count_transitions_njit,
     rle_collapse_njit,
+    rle_collapse_with_dwells_njit,
 )
 from seqsm.linalg import (
     conditional_entropy_rate,
@@ -53,6 +54,8 @@ class KOrderMarkovChain:
         self._companion_matrix: NDArray[np.float64] | None = None
         self._sparse_companion: CSRMatrix | None = None
         self._dwell_stats: dict[int, DwellDistribution] = {}
+        self._cached_pi: NDArray[np.float64] | None = None
+        self._cached_mu: NDArray[np.float64] | None = None
 
     @property
     def k(self) -> int:
@@ -145,13 +148,21 @@ class KOrderMarkovChain:
             if dwell_times is None:
                 eff_states, eff_dwells, eff_episodes = rle_collapse_njit(states_arr, episodes_arr)
             else:
-                eff_states = states_arr
-                eff_dwells = np.asarray(dwell_times, dtype=np.int32)
-                eff_episodes = episodes_arr
+                dwells_arr = np.asarray(dwell_times, dtype=np.int32)
+                if len(dwells_arr) != len(states_arr):
+                    raise ValueError(
+                        f"dwell_times length ({len(dwells_arr)}) must match states length ({len(states_arr)})."
+                    )
+                eff_states, eff_dwells, eff_episodes = rle_collapse_with_dwells_njit(
+                    states_arr, dwells_arr, episodes_arr
+                )
         else:
             eff_states = states_arr
             eff_episodes = episodes_arr
             eff_dwells = np.empty(0, dtype=np.int32)
+
+        self._cached_pi = None
+        self._cached_mu = None
 
         # Infer state space cardinality
         if n_states is not None:
@@ -170,7 +181,7 @@ class KOrderMarkovChain:
         counts_arr = count_transitions_njit(src_u, tgt_v, n_windows, self._n_states).astype(np.float64)
         self._count_matrix = counts_arr
         self._transition_matrix = compute_transition_probs_njit(counts_arr, self._smoothing)
-        self._build_companion_matrix(src_u)
+        self._build_companion_matrix()
 
         # Compute dwell stats if in event mode
         if self._mode == "event" and len(eff_dwells) > 0:
@@ -195,18 +206,16 @@ class KOrderMarkovChain:
 
         return self
 
-    def _build_companion_matrix(self, src_u: NDArray[np.int32]) -> None:
+    def _build_companion_matrix(self) -> None:
         """Constructs companion transition operator (dense array or CSRMatrix)."""
         n_windows = self._encoder.n_windows
         assert self._transition_matrix is not None
-        if len(src_u) > 0:
-            win_counts = np.bincount(src_u, minlength=n_windows).astype(np.float64)
-            win_sum = float(np.sum(win_counts))
-            win_marginal = (
-                win_counts / win_sum if win_sum > 0.0 else np.full(n_windows, 1.0 / max(1, n_windows), dtype=np.float64)
-            )
-        else:
-            win_marginal = np.full(n_windows, 1.0 / max(1, n_windows), dtype=np.float64)
+        assert self._count_matrix is not None
+        win_counts = np.sum(self._count_matrix, axis=1)
+        win_sum = float(np.sum(win_counts))
+        win_marginal = (
+            win_counts / win_sum if win_sum > 0.0 else np.full(n_windows, 1.0 / max(1, n_windows), dtype=np.float64)
+        )
 
         if n_windows >= self._sparse_threshold:
             csr_indptr = [0]
@@ -288,13 +297,21 @@ class KOrderMarkovChain:
             if dwell_times is None:
                 eff_states, eff_dwells, eff_episodes = rle_collapse_njit(states_arr, episodes_arr)
             else:
-                eff_states = states_arr
-                eff_dwells = np.asarray(dwell_times, dtype=np.int32)
-                eff_episodes = episodes_arr
+                dwells_arr = np.asarray(dwell_times, dtype=np.int32)
+                if len(dwells_arr) != len(states_arr):
+                    raise ValueError(
+                        f"dwell_times length ({len(dwells_arr)}) must match states length ({len(states_arr)})."
+                    )
+                eff_states, eff_dwells, eff_episodes = rle_collapse_with_dwells_njit(
+                    states_arr, dwells_arr, episodes_arr
+                )
         else:
             eff_states = states_arr
             eff_episodes = episodes_arr
             eff_dwells = np.empty(0, dtype=np.int32)
+
+        self._cached_pi = None
+        self._cached_mu = None
 
         if n_states is not None:
             self._n_states = max(self._n_states, n_states)
@@ -322,7 +339,7 @@ class KOrderMarkovChain:
 
         self._count_matrix = new_counts
         self._transition_matrix = compute_transition_probs_njit(self._count_matrix, self._smoothing)
-        self._build_companion_matrix(src_u)
+        self._build_companion_matrix()
 
         if self._mode == "event" and len(eff_dwells) > 0:
             dwell_buckets: dict[int, list[int]] = {sid: list(dist.samples) for sid, dist in self._dwell_stats.items()}
@@ -391,15 +408,72 @@ class KOrderMarkovChain:
 
     def stationary_distribution(self, tol: float = 1e-10, max_iter: int = 10_000) -> NDArray[np.float64]:
         """Computes stationary distribution pi over K-windows."""
+        if self._cached_pi is not None and tol == 1e-10 and max_iter == 10_000:
+            return self._cached_pi
+
         mat = self._companion_matrix if self._companion_matrix is not None else self._sparse_companion
         if mat is None:
             raise ValueError("KOrderMarkovChain has not been fitted.")
-        return stationary_distribution_power_iteration(mat, tol=tol, max_iter=max_iter)
+        pi = stationary_distribution_power_iteration(mat, tol=tol, max_iter=max_iter)
+        if tol == 1e-10 and max_iter == 10_000:
+            self._cached_pi = pi
+        return pi
 
     def marginal_stationary_distribution(self) -> NDArray[np.float64]:
         """Computes marginal stationary distribution mu over atomic states."""
+        if self._cached_mu is not None:
+            return self._cached_mu
         pi = self.stationary_distribution()
-        return marginal_stationary_distribution(pi, self._encoder.k_tuples, self._n_states)
+        mu = marginal_stationary_distribution(pi, self._encoder.k_tuples, self._n_states)
+        self._cached_mu = mu
+        return mu
+
+    def decode_viterbi(
+        self,
+        init_history: Sequence[int] | NDArray[np.int32],
+        horizon: int,
+    ) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
+        """
+        Decodes the most likely trajectory of (windows, states) of length horizon using Viterbi decoding.
+        """
+        if self._transition_matrix is None:
+            raise ValueError("KOrderMarkovChain has not been fitted.")
+        if horizon <= 0:
+            raise ValueError(f"horizon must be >= 1, got {horizon}.")
+
+        n_win = self._encoder.n_windows
+        if n_win == 0:
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+        comp_obj = self.companion_matrix(dense=True)
+        comp = comp_obj.to_dense() if isinstance(comp_obj, CSRMatrix) else comp_obj
+        log_comp = np.log(np.maximum(comp, 1e-300))
+
+        hist_arr = tuple(int(x) for x in init_history)
+        if len(hist_arr) >= self._k:
+            win = hist_arr[-self._k :]
+            u0 = self._encoder.encode_window(win)
+        else:
+            u0 = -1
+
+        init_log = np.full(n_win, -1e300, dtype=np.float64)
+        if u0 >= 0:
+            init_log[u0] = 0.0
+        else:
+            pi = self.stationary_distribution()
+            init_log = np.log(np.maximum(pi, 1e-300))
+
+        from seqsm.kernels import viterbi_decode_path_njit
+
+        total_len = horizon + 1 if u0 >= 0 else horizon
+        full_win_path = viterbi_decode_path_njit(log_comp, init_log, total_len)
+        win_path = full_win_path[1:] if u0 >= 0 else full_win_path
+
+        state_path = np.zeros(horizon, dtype=np.int32)
+        for idx, u in enumerate(win_path):
+            state_path[idx] = self._encoder.decode_window(int(u))[-1]
+
+        return win_path, state_path
 
     def entropy_rate(self) -> float:
         """Computes conditional entropy rate H(S_{t+1} | W_t) in bits."""
@@ -483,13 +557,34 @@ class VariableOrderMarkovChain:
             norm = np.sum(total_prob)
             return total_prob / norm if norm > 0.0 else total_prob
 
-        # Witten-Bell or tuned backoff: try highest order first
+        if self._backoff == "tuned":
+            # PPMC / CTW-style recursive escape blending across orders 1..max_k backed off to mu
+            p_curr = self._chains[0].marginal_stationary_distribution().copy()
+            for chain in self._chains:
+                order = chain.k
+                if len(hist_arr) >= order and chain.count_matrix is not None:
+                    win = hist_arr[-order:]
+                    u = chain.encoder.encode_window(win)
+                    if u >= 0:
+                        c_u = chain.count_matrix[u]
+                        n_u = float(np.sum(c_u))
+                        t_u = float(np.count_nonzero(c_u))
+                        if n_u > 0.0:
+                            denom = n_u + t_u
+                            escape = t_u / denom
+                            continuation = n_u / denom
+                            emp_p = c_u / n_u
+                            p_curr = continuation * emp_p + escape * p_curr
+            norm = float(np.sum(p_curr))
+            return p_curr / norm if norm > 0.0 else p_curr
+
+        # Witten-Bell backoff: try highest order with observed transitions first
         for chain in reversed(self._chains):
             order = chain.k
             if len(hist_arr) >= order:
                 win = hist_arr[-order:]
                 u = chain.encoder.encode_window(win)
-                if u >= 0:
+                if u >= 0 and chain.count_matrix is not None:
                     counts = chain.count_matrix[u]
                     if np.sum(counts) > 0:
                         return chain.predict_proba_window(u)

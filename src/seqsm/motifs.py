@@ -15,6 +15,7 @@ from seqsm.markov import KOrderMarkovChain, VariableOrderMarkovChain
 def detect_period(
     states: NDArray[np.int32],
     max_lag: int | None = None,
+    min_rho: float = 0.05,
 ) -> int:
     """
     Detects dominant stream cycle lag via Categorical Match Autocorrelation (CMA).
@@ -41,11 +42,15 @@ def detect_period(
     denom = max(1.0 - p_baseline, 1e-12)
 
     best_tau = 1
-    best_rho = 0.05
+    best_rho = min_rho
 
     for tau in range(2, max_tau + 1):
-        matches = int(np.sum(arr[:-tau] == arr[tau:]))
-        r_cat = float(matches) / float(n - tau)
+        valid_pairs = (arr[:-tau] >= 0) & (arr[tau:] >= 0)
+        valid_count = int(np.sum(valid_pairs))
+        if valid_count == 0:
+            continue
+        matches = int(np.sum((arr[:-tau] == arr[tau:]) & valid_pairs))
+        r_cat = float(matches) / float(valid_count)
         rho = (r_cat - p_baseline) / denom
         if rho > best_rho:
             best_rho = rho
@@ -61,6 +66,11 @@ def score_anomalies(
     window_size: int = 5,
     threshold_quantile: float = 0.99,
     mode: Literal["two_factor", "nll"] = "two_factor",
+    weight_trans: float = 0.5,
+    weight_dwell: float = 0.5,
+    penalty_unseen_trans: float = 20.0,
+    penalty_unseen_dwell: float = 10.0,
+    prob_floor: float = 1e-8,
 ) -> pl.DataFrame:
     """
     Computes joint semi-Markov negative log-likelihood (NLL) and flags behavioral anomalies.
@@ -91,15 +101,21 @@ def score_anomalies(
     for i in range(n):
         target = int(states[i])
         if target < 0:
-            nll_trans[i] = 20.0
-            nll_dwell[i] = 10.0
+            nll_trans[i] = penalty_unseen_trans
+            nll_dwell[i] = penalty_unseen_dwell
             continue
 
         if i == 0:
-            mu = chain.marginal_stationary_distribution() if isinstance(chain, KOrderMarkovChain) else np.empty(0)
+            mu = (
+                chain.marginal_stationary_distribution()
+                if isinstance(chain, KOrderMarkovChain)
+                else chain.chains[0].marginal_stationary_distribution()
+            )
             p_trans = float(mu[target]) if target < len(mu) else 1e-6
         elif isinstance(chain, VariableOrderMarkovChain):
-            probs = chain.predict_proba(states[:i])
+            max_k = max(c.k for c in chain.chains)
+            hist = states[max(0, i - max_k) : i]
+            probs = chain.predict_proba(hist)
             p_trans = float(probs[target]) if target < len(probs) else 1e-6
         else:
             k = chain.k
@@ -112,7 +128,7 @@ def score_anomalies(
                 mu = chain.marginal_stationary_distribution()
                 p_trans = float(mu[target]) if target < len(mu) else 1e-6
 
-        nll_trans[i] = -float(np.log2(max(p_trans, 1e-8)))
+        nll_trans[i] = -float(np.log2(max(p_trans, prob_floor)))
 
         d_val = int(dwells[i]) if i < len(dwells) else 1
         if target in dwell_stats and len(dwell_stats[target].samples) > 0:
@@ -121,17 +137,16 @@ def score_anomalies(
             p_dwell = float(match_count) / float(len(samples)) if match_count > 0 else 1.0 / (len(samples) + 1.0)
         else:
             p_dwell = 1.0
-        nll_dwell[i] = -float(np.log2(max(p_dwell, 1e-8)))
+        nll_dwell[i] = -float(np.log2(max(p_dwell, prob_floor)))
 
     if mode == "two_factor":
-        compound = 0.5 * nll_trans + 0.5 * nll_dwell
+        compound = weight_trans * nll_trans + weight_dwell * nll_dwell
     else:
         compound = nll_trans
 
-    rolling_nll = np.zeros(n, dtype=np.float64)
-    for i in range(n):
-        start = max(0, i - window_size + 1)
-        rolling_nll[i] = float(np.mean(compound[start : i + 1]))
+    cumsum = np.cumsum(np.insert(compound, 0, 0.0))
+    window_lengths = np.minimum(np.arange(1, n + 1), window_size)
+    rolling_nll = (cumsum[1:] - cumsum[np.maximum(0, np.arange(1, n + 1) - window_size)]) / window_lengths
 
     thresh = float(np.quantile(rolling_nll, threshold_quantile)) if n > 1 else 10.0
     is_anomaly = rolling_nll >= thresh

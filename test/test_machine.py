@@ -98,6 +98,17 @@ class TestStateMachine(unittest.TestCase):
         for p in edges["probability"].to_list():
             self.assertAlmostEqual(p, 1.0)
 
+    def test_extract_cycles_frequency_r13(self) -> None:
+        chain = KOrderMarkovChain(k=1)
+        # Cycle 0 -> 1 -> 0
+        seq = np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.int32)
+        chain.fit_from_arrays(seq)
+        fsm = StateMachine.from_markov(chain, self.encoder, min_prob=0.0)
+        cycles = fsm.extract_cycles(max_length=4)
+        self.assertGreater(len(cycles), 0)
+        # Cycles found across rotations accumulate frequency
+        self.assertGreaterEqual(cycles[0].frequency, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

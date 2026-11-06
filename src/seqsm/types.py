@@ -11,7 +11,7 @@ from numpy.typing import DTypeLike, NDArray
 
 # Model operation modes
 ModeType = Literal["clock", "event"]
-PredictionMethod = Literal["sample", "map"]
+PredictionMethod = Literal["sample", "map", "viterbi"]
 ScheduleMethod = Literal["sample", "map", "constrained"]
 BackoffMethod = Literal["witten_bell", "linear", "tuned"]
 
@@ -34,14 +34,12 @@ class CSRMatrix:
 
     def dot_vector_left(self, vec: NDArray[np.float64]) -> NDArray[np.float64]:
         """Computes vector-matrix product: vec @ CSR of shape (shape[1],)."""
-        res = np.zeros(self.shape[1], dtype=np.float64)
-        for i in range(self.shape[0]):
-            v = float(vec[i])
-            if v == 0.0:
-                continue
-            start, end = int(self.indptr[i]), int(self.indptr[i + 1])
-            res[self.indices[start:end]] += v * self.data[start:end]
-        return res
+        if len(self.data) == 0:
+            return np.zeros(self.shape[1], dtype=np.float64)
+        row_counts = np.diff(self.indptr)
+        row_indices = np.repeat(np.arange(self.shape[0], dtype=np.int32), row_counts)
+        weights = vec[row_indices] * self.data
+        return np.bincount(self.indices, weights=weights, minlength=self.shape[1]).astype(np.float64)
 
 
 @dataclass(frozen=True)
@@ -77,6 +75,7 @@ class ScheduleTrajectory:
     dwell_durations: tuple[int, ...]
     transition_probs: tuple[float, ...]
     arc_valid: tuple[bool, ...]
+    constraint_violated: tuple[bool, ...] = field(default_factory=tuple)
 
 
 @dataclass(frozen=True)

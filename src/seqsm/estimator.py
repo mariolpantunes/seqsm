@@ -33,11 +33,13 @@ def parse_duration(duration: str | timedelta) -> timedelta:
     match = re.fullmatch(r"^(\d+(?:\.\d+)?)\s*(ms|us|µs|s|m|h|d|w)$", s)
     if not match:
         raise ValueError(
-            f"Invalid duration format: '{duration}'. Expected format like '1d', '12h', '30m', '15s', '500ms'."
+            f"Invalid duration format: '{duration}'. Expected single unit format like '1d', '12h', '30m', '15s', '500ms' (compound strings like '1h30m' are not supported)."
         )
 
     val_str, unit = match.groups()
     val = float(val_str)
+    if val <= 0.0:
+        raise ValueError(f"Duration must be strictly positive, got '{duration}'.")
     if unit in ("us", "µs"):
         return timedelta(microseconds=val)
     if unit == "ms":
@@ -86,6 +88,7 @@ class SeqSM:
         self.min_count: int = min_count
         self.seed: int | None = seed
         self.dtype: DTypeLike = dtype
+        self._rng: np.random.Generator = np.random.default_rng(seed)
 
         self._encoder: StateEncoder | None = None
         self._chain: KOrderMarkovChain | None = None
@@ -241,11 +244,21 @@ class SeqSM:
         if self._chain is None or self._encoder is None:
             raise ValueError("SeqSM has not been fitted.")
 
+        if method == "viterbi" and isinstance(self._chain, KOrderMarkovChain):
+            hist_ids: Sequence[int] = ()
+            if history is not None:
+                if isinstance(history, pl.DataFrame):
+                    hist_ids = [int(x) for x in self._encoder.transform(history)]
+                else:
+                    hist_ids = [int(x) for x in history]
+            _, state_path = self._chain.decode_viterbi(hist_ids, steps)
+            return self._encoder.inverse_transform(state_path)
+
         probs = self.predict_proba(history=history, steps=steps)
-        rng = np.random.default_rng(self.seed)
+        rng = self._rng if self.seed is not None else np.random.default_rng()
 
         if probs.ndim == 1:
-            if method == "map":
+            if method in ("map", "viterbi"):
                 chosen_states = [int(np.argmax(probs))]
             else:
                 chosen_states = [int(rng.choice(len(probs), p=probs))]
@@ -253,7 +266,7 @@ class SeqSM:
             chosen_states = []
             for h in range(len(probs)):
                 row = probs[h]
-                if method == "map":
+                if method in ("map", "viterbi"):
                     chosen_states.append(int(np.argmax(row)))
                 else:
                     chosen_states.append(int(rng.choice(len(row), p=row)))
@@ -325,8 +338,11 @@ class SeqSM:
         all_dwells: list[int] = []
         all_probs: list[float] = []
         all_valids: list[bool] = []
+        all_violated: list[bool] = []
 
-        eff_seed = seed if seed is not None else (self.seed if self.seed is not None else 42)
+        base_seed = seed if seed is not None else (self.seed if self.seed is not None else 42)
+        ss = np.random.SeedSequence(base_seed)
+        child_seeds = [int(s.generate_state(1)[0]) for s in ss.spawn(n_schedules)]
 
         for sched_id in range(n_schedules):
             traj = gen.generate(
@@ -334,7 +350,7 @@ class SeqSM:
                 init_history=init_arr,
                 method=method,
                 constraints=constraints,
-                seed=eff_seed + sched_id,
+                seed=child_seeds[sched_id],
             )
 
             curr_t = 0
@@ -342,6 +358,7 @@ class SeqSM:
                 dwell = traj.dwell_durations[idx]
                 prob = traj.transition_probs[idx]
                 valid = traj.arc_valid[idx]
+                violated = traj.constraint_violated[idx] if idx < len(traj.constraint_violated) else False
 
                 all_schedule_ids.append(sched_id)
                 all_time_steps.append(curr_t)
@@ -350,6 +367,7 @@ class SeqSM:
                 all_dwells.append(dwell)
                 all_probs.append(prob)
                 all_valids.append(valid)
+                all_violated.append(violated)
 
                 curr_t += dwell
                 if curr_t >= n_steps:
@@ -365,6 +383,7 @@ class SeqSM:
                 "dwell_duration": np.array(all_dwells, dtype=np.int32),
                 "transition_prob": np.array(all_probs, dtype=np.float64),
                 "arc_valid": all_valids,
+                "constraint_violated": all_violated,
             }
         )
 
@@ -377,10 +396,15 @@ class SeqSM:
         timestamp_col: str | None = None,
     ) -> int:
         """Detects dominant stream cycle lag in discrete steps via Categorical Match Autocorrelation (CMA)."""
-        _ = timestamp_col
+        ts_col = timestamp_col if timestamp_col is not None else self.timestamp_col
         if self._encoder is None:
             raise ValueError("SeqSM has not been fitted.")
-        states = self._encoder.transform(df)
+
+        frame = df.collect() if isinstance(df, pl.LazyFrame) else df
+        if ts_col is not None and ts_col in frame.columns:
+            frame = frame.sort(ts_col)
+
+        states = self._encoder.transform(frame)
         return detect_period(states)
 
     def score_anomalies(

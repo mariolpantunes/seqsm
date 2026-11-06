@@ -78,6 +78,26 @@ class TestMotifs(unittest.TestCase):
         self.assertIn("nll_dwell", res.columns)
         self.assertIn("rolling_nll", res.columns)
 
+    def test_detect_period_ignores_negative_states_r12(self) -> None:
+        # Periodic 0, 1 with interleaved -1
+        seq = np.array([-1, -1, -1, -1, -1], dtype=np.int32)
+        # All -1 states should not crash and should return 1
+        self.assertEqual(detect_period(seq), 1)
+
+    def test_score_anomalies_custom_parameters_r11(self) -> None:
+        seq = np.array([0, 1, 0, 1, 0, 1], dtype=np.int32)
+        res_nll = score_anomalies(self.chain, seq, mode="nll", prob_floor=1e-6)
+        self.assertEqual(len(res_nll), len(seq))
+        res_weighted = score_anomalies(
+            self.chain,
+            seq,
+            mode="two_factor",
+            weight_trans=0.7,
+            weight_dwell=0.3,
+            penalty_unseen_trans=25.0,
+        )
+        self.assertEqual(len(res_weighted), len(seq))
+
 
 if __name__ == "__main__":
     unittest.main()
