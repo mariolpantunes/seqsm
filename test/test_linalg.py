@@ -14,6 +14,7 @@ from seqsm.linalg import (
     model_perplexity,
     stationary_distribution_power_iteration,
 )
+from seqsm.types import CSRMatrix
 
 
 class TestLinalg(unittest.TestCase):
@@ -41,6 +42,29 @@ class TestLinalg(unittest.TestCase):
         expected = np.array([2.0 / 3.0, 1.0 / 3.0], dtype=np.float64)
         np.testing.assert_allclose(pi, expected, atol=1e-8)
         np.testing.assert_allclose(pi @ P, pi, atol=1e-8)
+        self.assertAlmostEqual(float(np.sum(pi)), 1.0)
+
+    def test_stationary_distribution_csr(self) -> None:
+        # P = [[0.8, 0.2], [0.4, 0.6]] as CSRMatrix
+        csr = CSRMatrix(
+            data=np.array([0.8, 0.2, 0.4, 0.6], dtype=np.float64),
+            indices=np.array([0, 1, 0, 1], dtype=np.int32),
+            indptr=np.array([0, 2, 4], dtype=np.int32),
+            shape=(2, 2),
+        )
+        pi = stationary_distribution_power_iteration(csr)
+        expected = np.array([2.0 / 3.0, 1.0 / 3.0], dtype=np.float64)
+        np.testing.assert_allclose(pi, expected, atol=1e-8)
+        self.assertAlmostEqual(float(np.sum(pi)), 1.0)
+        dense = csr.to_dense()
+        np.testing.assert_allclose(dense, [[0.8, 0.2], [0.4, 0.6]])
+
+    def test_stationary_distribution_forced_eigenvalue_fallback(self) -> None:
+        # Force max_iter=1 so power iteration cannot converge to 1e-10
+        P = np.array([[0.8, 0.2], [0.4, 0.6]], dtype=np.float64)
+        pi = stationary_distribution_power_iteration(P, tol=1e-12, max_iter=1)
+        expected = np.array([2.0 / 3.0, 1.0 / 3.0], dtype=np.float64)
+        np.testing.assert_allclose(pi, expected, atol=1e-6)
         self.assertAlmostEqual(float(np.sum(pi)), 1.0)
 
     def test_stationary_distribution_edge_cases(self) -> None:

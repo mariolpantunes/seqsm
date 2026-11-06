@@ -48,15 +48,15 @@ def compute_transition_probs_njit(
     return probs
 
 
-@nb.njit(nb.types.Tuple((nb.int32[:], nb.int32[:]))(nb.int32[:], nb.int32[:]), nogil=True, cache=True)
+@nb.njit(nb.types.Tuple((nb.int32[:], nb.int32[:], nb.int32[:]))(nb.int32[:], nb.int32[:]), nogil=True, cache=True)
 def rle_collapse_njit(
     states: NDArray[np.int32],
     episodes: NDArray[np.int32],
-) -> tuple[NDArray[np.int32], NDArray[np.int32]]:
-    """Collapses consecutive identical states into distinct event states and dwell counts."""
+) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.int32]]:
+    """Collapses consecutive identical states into distinct event states, dwell counts, and episode IDs."""
     n = len(states)
     if n == 0:
-        return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+        return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
     # First pass: count runs
     n_runs = 1
@@ -66,6 +66,7 @@ def rle_collapse_njit(
 
     out_states = np.empty(n_runs, dtype=np.int32)
     out_dwells = np.empty(n_runs, dtype=np.int32)
+    out_episodes = np.empty(n_runs, dtype=np.int32)
 
     run_idx = 0
     cur_state = states[0]
@@ -77,6 +78,7 @@ def rle_collapse_njit(
         if states[i] != cur_state or ep != cur_ep:
             out_states[run_idx] = cur_state
             out_dwells[run_idx] = cur_count
+            out_episodes[run_idx] = cur_ep
             run_idx += 1
             cur_state = states[i]
             cur_ep = ep
@@ -86,7 +88,8 @@ def rle_collapse_njit(
 
     out_states[run_idx] = cur_state
     out_dwells[run_idx] = cur_count
-    return out_states, out_dwells
+    out_episodes[run_idx] = cur_ep
+    return out_states, out_dwells, out_episodes
 
 
 @nb.njit(

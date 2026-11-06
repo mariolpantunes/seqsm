@@ -21,7 +21,7 @@ from seqsm.linalg import (
     model_perplexity,
     stationary_distribution_power_iteration,
 )
-from seqsm.types import BackoffMethod, DwellDistribution, ModeType
+from seqsm.types import BackoffMethod, CSRMatrix, DwellDistribution, ModeType
 
 
 class KOrderMarkovChain:
@@ -52,6 +52,7 @@ class KOrderMarkovChain:
         self._count_matrix: NDArray[np.int64] | None = None
         self._transition_matrix: NDArray[np.float64] | None = None
         self._companion_matrix: NDArray[np.float64] | None = None
+        self._sparse_companion: CSRMatrix | None = None
         self._dwell_stats: dict[int, DwellDistribution] = {}
 
     @property
@@ -98,12 +99,34 @@ class KOrderMarkovChain:
         """Returns empirical state dwell distributions."""
         return self._dwell_stats
 
-    def companion_matrix(self, dense: bool = True) -> NDArray[np.float64]:
+    def companion_matrix(self, dense: bool = True) -> NDArray[np.float64] | CSRMatrix:
         """Returns square De Bruijn companion transition matrix P_tilde of shape (N_K, N_K)."""
-        _ = dense
-        if self._companion_matrix is None:
+        if self._companion_matrix is None and self._sparse_companion is None:
             raise ValueError("KOrderMarkovChain has not been fitted.")
-        return self._companion_matrix
+        if dense:
+            if self._companion_matrix is not None:
+                return self._companion_matrix
+            assert self._sparse_companion is not None
+            return self._sparse_companion.to_dense()
+        if self._sparse_companion is not None:
+            return self._sparse_companion
+        assert self._companion_matrix is not None
+        nrows, ncols = self._companion_matrix.shape
+        indptr = np.empty(nrows + 1, dtype=np.int32)
+        indptr[0] = 0
+        indices_list: list[int] = []
+        data_list: list[float] = []
+        for r in range(nrows):
+            nonzero_cols = np.where(self._companion_matrix[r, :] > 0.0)[0]
+            indices_list.extend(nonzero_cols)
+            data_list.extend(self._companion_matrix[r, nonzero_cols])
+            indptr[r + 1] = len(indices_list)
+        return CSRMatrix(
+            data=np.asarray(data_list, dtype=np.float64),
+            indices=np.asarray(indices_list, dtype=np.int32),
+            indptr=indptr,
+            shape=(nrows, ncols),
+        )
 
     def fit_from_arrays(
         self,
@@ -121,11 +144,11 @@ class KOrderMarkovChain:
         # In event mode, collapse identical consecutive states
         if self._mode == "event":
             if dwell_times is None:
-                eff_states, eff_dwells = rle_collapse_njit(states_arr, episodes_arr)
+                eff_states, eff_dwells, eff_episodes = rle_collapse_njit(states_arr, episodes_arr)
             else:
                 eff_states = states_arr
                 eff_dwells = np.asarray(dwell_times, dtype=np.int32)
-            eff_episodes = np.empty(0, dtype=np.int32)  # Boundaries already respected in collapse
+                eff_episodes = episodes_arr
         else:
             eff_states = states_arr
             eff_episodes = episodes_arr
@@ -148,27 +171,76 @@ class KOrderMarkovChain:
         self._count_matrix = count_transitions_njit(src_u, tgt_v, n_windows, self._n_states)
         self._transition_matrix = compute_transition_probs_njit(self._count_matrix, self._smoothing)
 
-        # Build square companion matrix (N_K x N_K)
-        self._companion_matrix = np.zeros((n_windows, n_windows), dtype=np.float64)
-        for u in range(n_windows):
-            win_u = self._encoder.decode_window(u)
-            for v in range(self._n_states):
-                p_uv = self._transition_matrix[u, v]
-                if p_uv <= 0.0:
-                    continue
-                succ_tuple = (*win_u[1:], v)
-                u_prime = self._encoder.encode_window(succ_tuple)
-                if u_prime >= 0:
-                    self._companion_matrix[u, u_prime] += p_uv
-                else:
-                    self._companion_matrix[u, u] += p_uv
+        # Empirical window marginal frequencies for fallback
+        if len(src_u) > 0:
+            win_counts = np.bincount(src_u, minlength=n_windows).astype(np.float64)
+            win_sum = float(np.sum(win_counts))
+            win_marginal = (
+                win_counts / win_sum if win_sum > 0.0 else np.full(n_windows, 1.0 / max(1, n_windows), dtype=np.float64)
+            )
+        else:
+            win_marginal = np.full(n_windows, 1.0 / max(1, n_windows), dtype=np.float64)
 
-            # Maintain row-stochasticity
-            row_sum = np.sum(self._companion_matrix[u, :])
-            if row_sum > 0.0:
-                self._companion_matrix[u, :] /= row_sum
-            elif n_windows > 0:
-                self._companion_matrix[u, :] = 1.0 / n_windows
+        if n_windows >= self._sparse_threshold:
+            # Direct CSR companion construction
+            csr_indptr = [0]
+            csr_indices: list[int] = []
+            csr_data: list[float] = []
+            for u in range(n_windows):
+                win_u = self._encoder.decode_window(u)
+                attested: list[tuple[int, float]] = []
+                for v in range(self._n_states):
+                    p_uv = float(self._transition_matrix[u, v])
+                    if p_uv <= 0.0:
+                        continue
+                    succ_tuple = (*win_u[1:], v)
+                    u_prime = self._encoder.encode_window(succ_tuple)
+                    if u_prime >= 0:
+                        attested.append((u_prime, p_uv))
+
+                if attested:
+                    denom = sum(p for _, p in attested)
+                    attested.sort(key=lambda x: x[0])
+                    for u_prime, p in attested:
+                        csr_indices.append(u_prime)
+                        csr_data.append(p / denom)
+                elif n_windows > 0:
+                    for w in range(n_windows):
+                        if win_marginal[w] > 0.0:
+                            csr_indices.append(w)
+                            csr_data.append(float(win_marginal[w]))
+                csr_indptr.append(len(csr_indices))
+
+            self._sparse_companion = CSRMatrix(
+                data=np.asarray(csr_data, dtype=np.float64),
+                indices=np.asarray(csr_indices, dtype=np.int32),
+                indptr=np.asarray(csr_indptr, dtype=np.int32),
+                shape=(n_windows, n_windows),
+            )
+            self._companion_matrix = None
+        else:
+            # Build square companion matrix (N_K x N_K) with attested successor normalization
+            self._companion_matrix = np.zeros((n_windows, n_windows), dtype=np.float64)
+            for u in range(n_windows):
+                win_u = self._encoder.decode_window(u)
+                attested_dense: list[tuple[int, float]] = []
+                for v in range(self._n_states):
+                    p_uv = float(self._transition_matrix[u, v])
+                    if p_uv <= 0.0:
+                        continue
+                    succ_tuple = (*win_u[1:], v)
+                    u_prime = self._encoder.encode_window(succ_tuple)
+                    if u_prime >= 0:
+                        attested_dense.append((u_prime, p_uv))
+
+                if attested_dense:
+                    denom = sum(p for _, p in attested_dense)
+                    for u_prime, p in attested_dense:
+                        self._companion_matrix[u, u_prime] += p / denom
+                elif n_windows > 0:
+                    self._companion_matrix[u, :] = win_marginal
+
+            self._sparse_companion = None
 
         # Compute dwell stats if in event mode
         if self._mode == "event" and len(eff_dwells) > 0:
@@ -210,7 +282,7 @@ class KOrderMarkovChain:
 
         Uses OpenBLAS matrix power of companion matrix P_tilde^(steps-1) * P.
         """
-        if self._companion_matrix is None or self._transition_matrix is None:
+        if (self._companion_matrix is None and self._sparse_companion is None) or self._transition_matrix is None:
             raise ValueError("KOrderMarkovChain has not been fitted.")
         if steps < 1:
             raise ValueError(f"Steps must be >= 1, got {steps}.")
@@ -224,16 +296,20 @@ class KOrderMarkovChain:
         else:
             e_u.fill(1.0 / n_windows)
 
-        comp_pow = companion_matrix_power(self._companion_matrix, steps - 1)
+        dense_comp = (
+            self._companion_matrix if self._companion_matrix is not None else self._sparse_companion.to_dense()  # type: ignore[union-attr]
+        )
+        comp_pow = companion_matrix_power(dense_comp, steps - 1)
         win_dist = e_u @ comp_pow
         state_dist = win_dist @ self._transition_matrix
         return state_dist
 
     def stationary_distribution(self, tol: float = 1e-10, max_iter: int = 10_000) -> NDArray[np.float64]:
         """Computes stationary distribution pi over K-windows."""
-        if self._companion_matrix is None:
+        mat = self._companion_matrix if self._companion_matrix is not None else self._sparse_companion
+        if mat is None:
             raise ValueError("KOrderMarkovChain has not been fitted.")
-        return stationary_distribution_power_iteration(self._companion_matrix, tol=tol, max_iter=max_iter)
+        return stationary_distribution_power_iteration(mat, tol=tol, max_iter=max_iter)
 
     def marginal_stationary_distribution(self) -> NDArray[np.float64]:
         """Computes marginal stationary distribution mu over atomic states."""

@@ -50,9 +50,10 @@ class TestKernels(unittest.TestCase):
         # Empty
         s_empty = np.empty(0, dtype=np.int32)
         e_empty = np.empty(0, dtype=np.int32)
-        states, dwells = rle_collapse_njit(s_empty, e_empty)
+        states, dwells, eps_out = rle_collapse_njit(s_empty, e_empty)
         self.assertEqual(len(states), 0)
         self.assertEqual(len(dwells), 0)
+        self.assertEqual(len(eps_out), 0)
 
         # Sequence with runs and episode break
         # Episode 0: state 1 (x3), state 2 (x1)
@@ -60,10 +61,11 @@ class TestKernels(unittest.TestCase):
         seq = np.array([1, 1, 1, 2, 2, 2], dtype=np.int32)
         eps = np.array([0, 0, 0, 0, 1, 1], dtype=np.int32)
 
-        out_s, out_d = rle_collapse_njit(seq, eps)
+        out_s, out_d, out_e = rle_collapse_njit(seq, eps)
         self.assertEqual(len(out_s), 3)
         np.testing.assert_array_equal(out_s, [1, 2, 2])
         np.testing.assert_array_equal(out_d, [3, 1, 2])
+        np.testing.assert_array_equal(out_e, [0, 0, 1])
 
     def test_build_valid_arc_csr_njit(self) -> None:
         probs = np.array([[0.8, 0.2], [0.05, 0.95]], dtype=np.float64)

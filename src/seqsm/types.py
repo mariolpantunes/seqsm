@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+import numpy as np
 from numpy.typing import DTypeLike, NDArray
 
 # Model operation modes
@@ -13,6 +14,34 @@ ModeType = Literal["clock", "event"]
 PredictionMethod = Literal["sample", "map"]
 ScheduleMethod = Literal["sample", "map", "constrained"]
 BackoffMethod = Literal["witten_bell", "linear", "tuned"]
+
+
+@dataclass(frozen=True)
+class CSRMatrix:
+    """Compressed Sparse Row matrix representation."""
+
+    data: NDArray[np.float64]
+    indices: NDArray[np.int32]
+    indptr: NDArray[np.int32]
+    shape: tuple[int, int]
+
+    def to_dense(self) -> NDArray[np.float64]:
+        out = np.zeros(self.shape, dtype=np.float64)
+        for i in range(self.shape[0]):
+            start, end = int(self.indptr[i]), int(self.indptr[i + 1])
+            out[i, self.indices[start:end]] = self.data[start:end]
+        return out
+
+    def dot_vector_left(self, vec: NDArray[np.float64]) -> NDArray[np.float64]:
+        """Computes vector-matrix product: vec @ CSR of shape (shape[1],)."""
+        res = np.zeros(self.shape[1], dtype=np.float64)
+        for i in range(self.shape[0]):
+            v = float(vec[i])
+            if v == 0.0:
+                continue
+            start, end = int(self.indptr[i]), int(self.indptr[i + 1])
+            res[self.indices[start:end]] += v * self.data[start:end]
+        return res
 
 
 @dataclass(frozen=True)
@@ -62,6 +91,7 @@ class RoutineCycle:
 
 __all__ = [
     "BackoffMethod",
+    "CSRMatrix",
     "DTypeLike",
     "DwellDistribution",
     "ModeType",
