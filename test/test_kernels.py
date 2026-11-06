@@ -105,6 +105,33 @@ class TestKernels(unittest.TestCase):
         path = viterbi_decode_path_njit(log_comp, init_log, horizon)
         np.testing.assert_array_equal(path, [0, 1, 0, 1])
 
+    def test_viterbi_brute_force_reference_h3(self) -> None:
+        import itertools
+
+        rng = np.random.default_rng(12345)
+        for n_states in [3, 4]:
+            for horizon in [3, 4, 5]:
+                log_comp = rng.uniform(-5.0, 0.0, size=(n_states, n_states))
+                init_log = rng.uniform(-5.0, 0.0, size=n_states)
+
+                viterbi_path = viterbi_decode_path_njit(log_comp, init_log, horizon)
+                viterbi_score = init_log[viterbi_path[0]] + sum(
+                    log_comp[viterbi_path[h - 1], viterbi_path[h]] for h in range(1, horizon)
+                )
+
+                best_score = -np.inf
+                best_path: tuple[int, ...] = ()
+                for cand_path in itertools.product(range(n_states), repeat=horizon):
+                    score = init_log[cand_path[0]] + sum(
+                        log_comp[cand_path[h - 1], cand_path[h]] for h in range(1, horizon)
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_path = cand_path
+
+                self.assertAlmostEqual(viterbi_score, best_score, places=9)
+                np.testing.assert_array_equal(viterbi_path, np.array(best_path, dtype=np.int32))
+
 
 if __name__ == "__main__":
     unittest.main()

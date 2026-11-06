@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timedelta
 
+import numpy as np
 import polars as pl
 
 from seqsm.estimator import SeqSM, parse_duration
@@ -64,6 +65,24 @@ class TestEstimator(unittest.TestCase):
         model.fit(self.df)
         self.assertEqual(model.markov_chain.k, 1)
 
+    def test_predict_proba_bounds_checking_m7(self) -> None:
+        model = SeqSM(k=1, feature_cols=["motion", "light"])
+        model.fit(self.df)
+        n_states = model.state_encoder.n_states
+
+        with self.assertRaises(ValueError):
+            model.predict_proba(history=[-1])
+        with self.assertRaises(ValueError):
+            model.predict_proba(history=[n_states])
+        with self.assertRaises(ValueError):
+            model.predict(history=[-1])
+        with self.assertRaises(ValueError):
+            model.predict(history=[n_states + 5])
+        with self.assertRaises(ValueError):
+            model.generate_schedule(window=5, init_history=[-1])
+        with self.assertRaises(ValueError):
+            model.generate_schedule(window=5, init_history=[n_states])
+
     def test_predict_and_proba(self) -> None:
         model = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.1)
         model.fit(self.df)
@@ -90,31 +109,40 @@ class TestEstimator(unittest.TestCase):
         self.assertEqual(len(pred_sample), 1)
 
     def test_partial_fit_incremental_and_decay_c2(self) -> None:
-        # Fitting batch 1 then batch 2 with decay=1.0 should accumulate counts
-        batch1 = self.df.head(3)
-        batch2 = self.df.tail(2)
+        # Fitting episode 0 then episode 1 with decay=1.0 matches full concatenated fit
+        df_full = pl.DataFrame(
+            {
+                "motion": [0, 1, 0, 1, 1, 0],
+                "light": ["off", "on", "off", "on", "on", "off"],
+                "episode": [0, 0, 0, 1, 1, 1],
+            }
+        )
+        ep0 = df_full.filter(pl.col("episode") == 0)
+        ep1 = df_full.filter(pl.col("episode") == 1)
 
-        m_inc = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.0)
-        m_inc.fit(batch1)
-        c1 = m_inc.markov_chain.count_matrix.copy()
+        m_full = SeqSM(k=1, episode_col="episode", feature_cols=["motion", "light"], smoothing=0.1)
+        m_full.fit(df_full)
 
-        m_inc.partial_fit(batch2, decay=1.0)
-        c_inc = m_inc.markov_chain.count_matrix
+        m_inc = SeqSM(k=1, episode_col="episode", feature_cols=["motion", "light"], smoothing=0.1)
+        m_inc.fit(ep0)
+        m_inc.partial_fit(ep1, decay=1.0)
 
-        # Total counts in incremental should be greater than batch 1 alone
-        self.assertGreater(float(c_inc.sum()), float(c1.sum()))
+        # Count matrix and transition matrix must match full fit
+        np.testing.assert_allclose(m_inc.markov_chain.count_matrix, m_full.markov_chain.count_matrix)
+        np.testing.assert_allclose(m_inc.markov_chain.transition_matrix, m_full.markov_chain.transition_matrix)
 
         # Test decay < 1.0 discounts prior counts
-        m_decay = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.0)
-        m_decay.fit(batch1)
-        m_decay.partial_fit(batch2, decay=0.5)
+        m_decay = SeqSM(k=1, episode_col="episode", feature_cols=["motion", "light"], smoothing=0.0)
+        m_decay.fit(ep0)
+        m_decay.partial_fit(ep1, decay=0.5)
         c_decay = m_decay.markov_chain.count_matrix
-        self.assertLess(float(c_decay.sum()), float(c_inc.sum()))
+        self.assertLess(float(c_decay.sum()), float(m_full.markov_chain.count_matrix.sum()))
 
     def test_predict_multi_step_decoding_c3(self) -> None:
         model = SeqSM(k=1, feature_cols=["motion", "light"], smoothing=0.1)
         model.fit(self.df)
 
+        # 1. Multi-step without history
         pred_3_map = model.predict(steps=3, method="map")
         self.assertEqual(len(pred_3_map), 3)
         self.assertIn("motion", pred_3_map.columns)
@@ -122,6 +150,26 @@ class TestEstimator(unittest.TestCase):
 
         pred_3_sample = model.predict(steps=3, method="sample")
         self.assertEqual(len(pred_3_sample), 3)
+
+        # 2. Multi-step with DataFrame history and integer sequence history
+        pred_5_map = model.predict(history=self.df.head(2), steps=5, method="map")
+        self.assertEqual(len(pred_5_map), 5)
+
+        pred_5_sample = model.predict(history=[0, 1], steps=5, method="sample")
+        self.assertEqual(len(pred_5_sample), 5)
+
+        # Verify all decoded rows belong to known state vocabulary
+        known_tuples = set(model.state_encoder.vocabulary.select(["motion", "light"]).iter_rows())
+        for row in pred_5_map.iter_rows():
+            self.assertIn(row, known_tuples)
+        for row in pred_5_sample.iter_rows():
+            self.assertIn(row, known_tuples)
+
+        # 3. Verify MAP decodes exact argmax of each step
+        probs_5 = model.predict_proba(history=self.df.head(2), steps=5)
+        expected_sids = [int(np.argmax(probs_5[h])) for h in range(5)]
+        expected_df = model.state_encoder.inverse_transform(expected_sids)
+        self.assertTrue(pred_5_map.equals(expected_df))
 
     def test_duration_parsing_units_and_errors_h6(self) -> None:
         self.assertEqual(parse_duration("1d"), timedelta(days=1))

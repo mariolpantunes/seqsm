@@ -212,6 +212,8 @@ class SeqSM:
             hist_states = self._encoder.transform(history)
         else:
             hist_states = np.asarray(history, dtype=np.int32)
+            if len(hist_states) > 0 and (np.any(hist_states < 0) or np.any(hist_states >= self._encoder.n_states)):
+                raise ValueError(f"history contains state IDs outside valid range [0, {self._encoder.n_states - 1}].")
 
         if len(hist_states) < self.k:
             if steps == 1:
@@ -304,6 +306,10 @@ class SeqSM:
                 init_arr = self._encoder.transform(init_history)
             else:
                 init_arr = np.asarray(init_history, dtype=np.int32)
+                if len(init_arr) > 0 and (np.any(init_arr < 0) or np.any(init_arr >= self._encoder.n_states)):
+                    raise ValueError(
+                        f"init_history contains state IDs outside valid range [0, {self._encoder.n_states - 1}]."
+                    )
 
         gen = ScheduleGenerator(
             self._chain,

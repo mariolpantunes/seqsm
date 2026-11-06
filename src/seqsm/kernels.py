@@ -55,7 +55,13 @@ def rle_collapse_njit(
     states: NDArray[np.int32],
     episodes: NDArray[np.int32],
 ) -> tuple[NDArray[np.int32], NDArray[np.int32], NDArray[np.int32]]:
-    """Collapses consecutive identical states into distinct event states, dwell counts, and episode IDs."""
+    """
+    Collapses consecutive identical states into distinct event states, dwell counts, and episode IDs.
+
+    Unknown (-1) states are collapsed as discrete runs to preserve temporal continuity so that
+    downstream window encoders can detect and exclude windows containing -1, while dwell
+    statistics aggregation filters out s < 0.
+    """
     n = len(states)
     if n == 0:
         return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
@@ -135,7 +141,8 @@ def build_valid_arc_csr_njit(
                 n_added += 1
 
         if n_added == 0:
-            # Fallback: argmax unpruned
+            # Fallback: argmax unpruned. Because this row retains a single surviving arc,
+            # its normalized probability mass and cumulative distribution value are identically 1.0.
             best_v = 0
             best_p = probs[u, 0]
             for v in range(1, n_targets):

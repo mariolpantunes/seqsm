@@ -463,6 +463,8 @@ class VariableOrderMarkovChain:
         """Combines predictions across orders according to the backoff / interpolation policy."""
         hist_arr = tuple(int(x) for x in history)
         n_states = self._chains[0].n_states
+        if any(x < 0 or x >= n_states for x in hist_arr):
+            raise ValueError(f"history contains state IDs outside valid range [0, {n_states - 1}].")
 
         if self._backoff == "linear":
             weights = self._weights

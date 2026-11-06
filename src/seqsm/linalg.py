@@ -14,6 +14,8 @@ def companion_matrix_power(companion: NDArray[np.float64], steps: int) -> NDArra
         raise ValueError(f"Steps must be non-negative, got {steps}.")
     if steps == 0:
         return np.eye(companion.shape[0], dtype=companion.dtype)
+    if steps == 1:
+        return companion.copy()
     return np.linalg.matrix_power(companion, steps)
 
 
