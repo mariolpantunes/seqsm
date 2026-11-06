@@ -85,7 +85,7 @@ repos:
       - id: coverage
         name: coverage (unittest, --fail-under)
         entry: >-
-          bash -c 'PYTHONPATH=src venv/bin/python -m coverage run --source=seqsm
+          bash -c 'NUMBA_DISABLE_JIT=1 PYTHONPATH=src venv/bin/python -m coverage run --source=seqsm
           -m unittest discover -s test -q && venv/bin/python -m coverage report
           --fail-under=85'
         language: system

@@ -52,6 +52,7 @@ jobs:
       - name: Run tests with coverage
         env:
           PYTHONPATH: src
+          NUMBA_DISABLE_JIT: "1"
         run: |
           venv/bin/python -m coverage run --source=seqsm -m unittest discover -s test
           venv/bin/python -m coverage report -m --fail-under=85
