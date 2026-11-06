@@ -8,9 +8,11 @@ import numpy as np
 
 from seqsm.kernels import (
     build_valid_arc_csr_njit,
+    cma_detect_period_njit,
     compute_transition_probs_njit,
     count_transitions_njit,
     rle_collapse_njit,
+    viterbi_decode_csr_njit,
     viterbi_decode_path_njit,
 )
 
@@ -131,6 +133,59 @@ class TestKernels(unittest.TestCase):
 
                 self.assertAlmostEqual(viterbi_score, best_score, places=9)
                 np.testing.assert_array_equal(viterbi_path, np.array(best_path, dtype=np.int32))
+
+    def test_viterbi_sparse_csr_matches_brute_force_n3(self) -> None:
+        import itertools
+
+        rng = np.random.default_rng(54321)
+        for n_states in [3, 4]:
+            for horizon in [3, 4, 5]:
+                dense_mat = rng.uniform(-5.0, 0.0, size=(n_states, n_states))
+                for r in range(n_states):
+                    dense_mat[r, int(rng.integers(0, n_states))] = -1e20
+
+                indptr = np.zeros(n_states + 1, dtype=np.int32)
+                indices_list: list[int] = []
+                data_list: list[float] = []
+                for r in range(n_states):
+                    for c in range(n_states):
+                        val = dense_mat[r, c]
+                        if val > -1e10:
+                            indices_list.append(c)
+                            data_list.append(val)
+                    indptr[r + 1] = len(indices_list)
+
+                csr_indptr = indptr
+                csr_indices = np.array(indices_list, dtype=np.int32)
+                csr_log_data = np.array(data_list, dtype=np.float64)
+
+                init_log = rng.uniform(-5.0, 0.0, size=n_states)
+
+                csr_path = viterbi_decode_csr_njit(csr_indptr, csr_indices, csr_log_data, init_log, horizon)
+                csr_score = init_log[csr_path[0]] + sum(
+                    dense_mat[csr_path[h - 1], csr_path[h]] for h in range(1, horizon)
+                )
+
+                best_score = -np.inf
+                best_path: tuple[int, ...] = ()
+                for cand_path in itertools.product(range(n_states), repeat=horizon):
+                    score = init_log[cand_path[0]] + sum(
+                        dense_mat[cand_path[h - 1], cand_path[h]] for h in range(1, horizon)
+                    )
+                    if score > best_score:
+                        best_score = score
+                        best_path = cand_path
+
+                self.assertAlmostEqual(csr_score, best_score, places=9)
+                np.testing.assert_array_equal(csr_path, np.array(best_path, dtype=np.int32))
+
+    def test_cma_detect_period_njit(self) -> None:
+        p4_seq = np.tile(np.array([0, 1, 2, 3], dtype=np.int32), 15)
+        p_base = 0.25
+        denom = 0.75
+        tau, rho = cma_detect_period_njit(p4_seq, 20, p_base, denom, 0.05)
+        self.assertEqual(tau, 4)
+        self.assertAlmostEqual(rho, 1.0)
 
 
 if __name__ == "__main__":

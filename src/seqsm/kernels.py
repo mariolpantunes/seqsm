@@ -255,3 +255,84 @@ def viterbi_decode_path_njit(
         path[h - 1] = curr
 
     return path
+
+
+@nb.njit(nb.int32[:](nb.int32[:], nb.int32[:], nb.float64[:], nb.float64[:], nb.int64), nogil=True, cache=True)
+def viterbi_decode_csr_njit(
+    indptr: NDArray[np.int32],
+    indices: NDArray[np.int32],
+    log_data: NDArray[np.float64],
+    init_log_probs: NDArray[np.float64],
+    horizon: int,
+) -> NDArray[np.int32]:
+    """Dynamic programming Viterbi path decoding over sparse CSR companion log-probabilities."""
+    n_states = len(init_log_probs)
+    dp = np.copy(init_log_probs)
+    backpointers = np.zeros((horizon, n_states), dtype=np.int32)
+
+    for h in range(1, horizon):
+        next_dp = np.full(n_states, -1e30, dtype=np.float64)
+        for u_prev in range(n_states):
+            prev_val = dp[u_prev]
+            if prev_val <= -1e25:
+                continue
+            start = indptr[u_prev]
+            end = indptr[u_prev + 1]
+            for j in range(start, end):
+                u_next = indices[j]
+                score = prev_val + log_data[j]
+                if score > next_dp[u_next]:
+                    next_dp[u_next] = score
+                    backpointers[h, u_next] = u_prev
+        dp = next_dp
+
+    best_final = 0
+    best_val = dp[0]
+    for i in range(1, n_states):
+        if dp[i] > best_val:
+            best_val = dp[i]
+            best_final = i
+
+    path = np.zeros(horizon, dtype=np.int32)
+    path[horizon - 1] = best_final
+    curr = best_final
+    for h in range(horizon - 1, 0, -1):
+        curr = backpointers[h, curr]
+        path[h - 1] = curr
+
+    return path
+
+
+@nb.njit(
+    nb.types.Tuple((nb.int64, nb.float64))(nb.int32[:], nb.int64, nb.float64, nb.float64, nb.float64),
+    nogil=True,
+    cache=True,
+)
+def cma_detect_period_njit(
+    arr: NDArray[np.int32],
+    max_tau: int,
+    p_baseline: float,
+    denom: float,
+    min_rho: float,
+) -> tuple[int, float]:
+    """Computes Categorical Match Autocorrelation across lags tau in [2, max_tau]."""
+    n = len(arr)
+    best_tau = 1
+    best_rho = min_rho
+    for tau in range(2, max_tau + 1):
+        valid_count = 0
+        matches = 0
+        for t in range(n - tau):
+            s1 = arr[t]
+            s2 = arr[t + tau]
+            if s1 >= 0 and s2 >= 0:
+                valid_count += 1
+                if s1 == s2:
+                    matches += 1
+        if valid_count > 0:
+            r_cat = matches / valid_count
+            rho = (r_cat - p_baseline) / denom
+            if rho > best_rho:
+                best_rho = rho
+                best_tau = tau
+    return best_tau, best_rho

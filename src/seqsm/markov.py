@@ -445,9 +445,9 @@ class KOrderMarkovChain:
         if n_win == 0:
             return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
-        comp_obj = self.companion_matrix(dense=True)
-        comp = comp_obj.to_dense() if isinstance(comp_obj, CSRMatrix) else comp_obj
-        log_comp = np.log(np.maximum(comp, 1e-300))
+        csr = self.companion_matrix(dense=False)
+        assert isinstance(csr, CSRMatrix)
+        log_data = np.log(np.maximum(csr.data, 1e-300))
 
         hist_arr = tuple(int(x) for x in init_history)
         if len(hist_arr) >= self._k:
@@ -463,10 +463,10 @@ class KOrderMarkovChain:
             pi = self.stationary_distribution()
             init_log = np.log(np.maximum(pi, 1e-300))
 
-        from seqsm.kernels import viterbi_decode_path_njit
+        from seqsm.kernels import viterbi_decode_csr_njit
 
         total_len = horizon + 1 if u0 >= 0 else horizon
-        full_win_path = viterbi_decode_path_njit(log_comp, init_log, total_len)
+        full_win_path = viterbi_decode_csr_njit(csr.indptr, csr.indices, log_data, init_log, total_len)
         win_path = full_win_path[1:] if u0 >= 0 else full_win_path
 
         state_path = np.zeros(horizon, dtype=np.int32)

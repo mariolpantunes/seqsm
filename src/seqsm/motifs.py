@@ -22,6 +22,12 @@ def detect_period(
 
     R_cat(tau) = 1/(T - tau) * sum_{t=0}^{T - tau - 1} I(s_t == s_{t+tau})
     rho_cat(tau) = (R_cat(tau) - P_baseline) / (1 - P_baseline)
+
+    Parameters:
+        states: Sequence of atomic state IDs.
+        max_lag: Maximum lag horizon to scan (defaults to min(N//2, 500)).
+        min_rho: Minimum correlation elevation over stationary baseline P_baseline = sum_s p(s)^2
+            required to reject random background noise and accept lag tau as periodic (Jesus/Antunes FiCloud 2017).
     """
     arr = np.asarray(states, dtype=np.int32)
     n = len(arr)
@@ -41,22 +47,10 @@ def detect_period(
     p_baseline = float(np.sum(probs**2))
     denom = max(1.0 - p_baseline, 1e-12)
 
-    best_tau = 1
-    best_rho = min_rho
+    from seqsm.kernels import cma_detect_period_njit
 
-    for tau in range(2, max_tau + 1):
-        valid_pairs = (arr[:-tau] >= 0) & (arr[tau:] >= 0)
-        valid_count = int(np.sum(valid_pairs))
-        if valid_count == 0:
-            continue
-        matches = int(np.sum((arr[:-tau] == arr[tau:]) & valid_pairs))
-        r_cat = float(matches) / float(valid_count)
-        rho = (r_cat - p_baseline) / denom
-        if rho > best_rho:
-            best_rho = rho
-            best_tau = tau
-
-    return best_tau
+    best_tau, _ = cma_detect_period_njit(arr, max_tau, p_baseline, denom, min_rho)
+    return int(best_tau)
 
 
 def score_anomalies(
@@ -76,6 +70,19 @@ def score_anomalies(
     Computes joint semi-Markov negative log-likelihood (NLL) and flags behavioral anomalies.
 
     Decomposes into transition plausibility NLL_trans and dwell duration plausibility NLL_dwell.
+
+    Parameters:
+        chain: Fitted KOrderMarkovChain or VariableOrderMarkovChain model.
+        encoded_states: Sequence of atomic state IDs.
+        dwell_times: Optional dwell durations per state visit.
+        window_size: Window size for rolling anomaly NLL averaging.
+        threshold_quantile: Quantile cutoff on rolling NLL to flag anomaly steps.
+        mode: 'two_factor' (combines transition and dwell NLL) or 'nll' (transition only).
+        weight_trans: Weight for transition surprise (default 0.5 per semi-Markov ADL conventions).
+        weight_dwell: Weight for dwell duration surprise (default 0.5 per Jesus/Antunes FiCloud 2017).
+        penalty_unseen_trans: NLL penalty assigned to unseen/negative state transitions (default 20.0).
+        penalty_unseen_dwell: NLL penalty assigned to unobserved dwell durations (default 10.0).
+        prob_floor: Minimum probability floor to prevent log2(0) divergence (Begleiter et al., 2004).
     """
     states = np.asarray(encoded_states, dtype=np.int32)
     n = len(states)
@@ -96,7 +103,24 @@ def score_anomalies(
     nll_dwell = np.zeros(n, dtype=np.float64)
 
     dwells = np.asarray(dwell_times, dtype=np.int32) if dwell_times is not None else np.ones(n, dtype=np.int32)
-    dwell_stats = chain.dwell_stats if isinstance(chain, KOrderMarkovChain) else {}
+
+    # Precompute O(1) dwell sample frequency tables
+    from collections import Counter
+
+    dwell_counts: dict[int, tuple[Counter[int], int, float]] = {}
+    if isinstance(chain, KOrderMarkovChain):
+        for sid, d_dist in chain.dwell_stats.items():
+            if len(d_dist.samples) > 0:
+                c = Counter(d_dist.samples)
+                m = len(d_dist.samples)
+                dwell_counts[sid] = (c, m, 1.0 / (m + 1.0))
+
+    # Precompute marginal distribution
+    mu = (
+        chain.marginal_stationary_distribution()
+        if isinstance(chain, KOrderMarkovChain)
+        else chain.chains[0].marginal_stationary_distribution()
+    )
 
     for i in range(n):
         target = int(states[i])
@@ -106,11 +130,6 @@ def score_anomalies(
             continue
 
         if i == 0:
-            mu = (
-                chain.marginal_stationary_distribution()
-                if isinstance(chain, KOrderMarkovChain)
-                else chain.chains[0].marginal_stationary_distribution()
-            )
             p_trans = float(mu[target]) if target < len(mu) else 1e-6
         elif isinstance(chain, VariableOrderMarkovChain):
             max_k = max(c.k for c in chain.chains)
@@ -125,16 +144,15 @@ def score_anomalies(
                 probs = chain.predict_proba_window(u)
                 p_trans = float(probs[target]) if target < len(probs) else 1e-6
             else:
-                mu = chain.marginal_stationary_distribution()
                 p_trans = float(mu[target]) if target < len(mu) else 1e-6
 
         nll_trans[i] = -float(np.log2(max(p_trans, prob_floor)))
 
         d_val = int(dwells[i]) if i < len(dwells) else 1
-        if target in dwell_stats and len(dwell_stats[target].samples) > 0:
-            samples = dwell_stats[target].samples
-            match_count = samples.count(d_val)
-            p_dwell = float(match_count) / float(len(samples)) if match_count > 0 else 1.0 / (len(samples) + 1.0)
+        if target in dwell_counts:
+            counts, m, fallback_p = dwell_counts[target]
+            cnt = counts.get(d_val, 0)
+            p_dwell = float(cnt) / float(m) if cnt > 0 else fallback_p
         else:
             p_dwell = 1.0
         nll_dwell[i] = -float(np.log2(max(p_dwell, prob_floor)))
