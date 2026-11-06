@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Self
+from typing import Any, Literal, Self
 
 import numpy as np
 import polars as pl
@@ -21,11 +21,17 @@ class StateMachine:
         encoder: StateEncoder,
         min_prob: float = 0.05,
         min_count: int = 2,
+        mode: Literal["atomic", "debruijn"] = "atomic",
+        top_k_edges: int | None = None,
+        renormalize: bool = True,
     ) -> None:
         self._chain: KOrderMarkovChain = chain
         self._encoder: StateEncoder = encoder
         self._min_prob: float = min_prob
         self._min_count: int = min_count
+        self._mode: Literal["atomic", "debruijn"] = mode
+        self._top_k_edges: int | None = top_k_edges
+        self._renormalize: bool = renormalize
 
     @classmethod
     def from_markov(
@@ -35,12 +41,20 @@ class StateMachine:
         *,
         min_prob: float = 0.05,
         min_count: int = 2,
+        mode: Literal["atomic", "debruijn"] = "atomic",
         top_k_edges: int | None = None,
         renormalize: bool = True,
     ) -> Self:
         """Constructs a pruned StateMachine from a fitted KOrderMarkovChain."""
-        _ = (top_k_edges, renormalize)
-        return cls(chain, encoder, min_prob=min_prob, min_count=min_count)
+        return cls(
+            chain,
+            encoder,
+            min_prob=min_prob,
+            min_count=min_count,
+            mode=mode,
+            top_k_edges=top_k_edges,
+            renormalize=renormalize,
+        )
 
     def edges_dataframe(self, include_diffs: bool = True) -> pl.DataFrame:
         """Returns edges DataFrame with source, target, probability, count, and diff summary."""
@@ -49,37 +63,106 @@ class StateMachine:
         counts = self._chain.count_matrix
         n_windows, n_targets = probs.shape
 
-        source_nodes: list[int] = []
-        target_nodes: list[int] = []
-        edge_probs: list[float] = []
-        edge_counts: list[int] = []
-        diff_summaries: list[str] = []
+        if self._mode == "debruijn":
+            source_nodes: list[int] = []
+            target_nodes: list[int] = []
+            edge_probs: list[float] = []
+            edge_counts: list[int] = []
+            diff_summaries: list[str] = []
+
+            for u in range(n_windows):
+                for v in range(n_targets):
+                    p = float(probs[u, v])
+                    c = int(counts[u, v])
+                    if p >= self._min_prob and c >= self._min_count:
+                        source_nodes.append(u)
+                        target_nodes.append(v)
+                        edge_probs.append(p)
+                        edge_counts.append(c)
+                        if include_diffs:
+                            try:
+                                src_state = k_enc.decode_window(u)[-1]
+                                diff = self._encoder.state_diff(src_state, v)
+                                summary = "; ".join(f"{k}: {v0}->{v1}" for k, (v0, v1) in diff.items())
+                            except (KeyError, ValueError):
+                                summary = ""
+                            diff_summaries.append(summary)
+
+            data_debruijn: dict[str, list[Any]] = {
+                "source_id": source_nodes,
+                "target_id": target_nodes,
+                "probability": edge_probs,
+                "count": edge_counts,
+            }
+            if include_diffs:
+                data_debruijn["diff_summary"] = diff_summaries
+            return pl.DataFrame(data_debruijn)
+
+        # mode == "atomic": stationary-weighted state-pair aggregation
+        pi = self._chain.stationary_distribution()
+        weighted_p: dict[tuple[int, int], float] = {}
+        total_counts: dict[tuple[int, int], int] = {}
+        src_marginal: dict[int, float] = {}
 
         for u in range(n_windows):
-            win = k_enc.decode_window(u)
-            src_state = win[-1]  # Most recent state
+            src_state = int(k_enc.decode_window(u)[-1])
+            pi_u = float(pi[u])
+            src_marginal[src_state] = src_marginal.get(src_state, 0.0) + pi_u
             for v in range(n_targets):
-                p = float(probs[u, v])
-                c = int(counts[u, v])
-                if p >= self._min_prob and c >= self._min_count:
-                    source_nodes.append(src_state)
-                    target_nodes.append(v)
-                    edge_probs.append(p)
-                    edge_counts.append(c)
-                    if include_diffs:
+                p_uv = float(probs[u, v])
+                c_uv = int(counts[u, v])
+                if c_uv > 0 or p_uv > 0.0:
+                    pair = (src_state, v)
+                    weighted_p[pair] = weighted_p.get(pair, 0.0) + pi_u * p_uv
+                    total_counts[pair] = total_counts.get(pair, 0) + c_uv
+
+        out_by_src: dict[int, list[tuple[int, float, int]]] = {}
+        for (src_state, v), num_p in weighted_p.items():
+            mu_s = src_marginal.get(src_state, 1.0)
+            p_agg = num_p / mu_s if mu_s > 0.0 else 0.0
+            c_agg = total_counts.get((src_state, v), 0)
+            if p_agg >= self._min_prob and c_agg >= self._min_count:
+                out_by_src.setdefault(src_state, []).append((v, p_agg, c_agg))
+
+        final_sources: list[int] = []
+        final_targets: list[int] = []
+        final_probs: list[float] = []
+        final_counts: list[int] = []
+        final_diffs: list[str] = []
+
+        for src_state in sorted(out_by_src.keys()):
+            edges = out_by_src[src_state]
+            edges.sort(key=lambda item: item[1], reverse=True)
+            if self._top_k_edges is not None and len(edges) > self._top_k_edges:
+                edges = edges[: self._top_k_edges]
+
+            if self._renormalize and edges:
+                denom = sum(p for _, p, _ in edges)
+                if denom > 0.0:
+                    edges = [(v, p / denom, c) for v, p, c in edges]
+
+            for v, p, c in edges:
+                final_sources.append(src_state)
+                final_targets.append(v)
+                final_probs.append(p)
+                final_counts.append(c)
+                if include_diffs:
+                    try:
                         diff = self._encoder.state_diff(src_state, v)
                         summary = "; ".join(f"{k}: {v0}->{v1}" for k, (v0, v1) in diff.items())
-                        diff_summaries.append(summary)
+                    except (KeyError, ValueError):
+                        summary = ""
+                    final_diffs.append(summary)
 
-        data: dict[str, list] = {
-            "source_id": source_nodes,
-            "target_id": target_nodes,
-            "probability": edge_probs,
-            "count": edge_counts,
+        data_atomic: dict[str, list[Any]] = {
+            "source_id": final_sources,
+            "target_id": final_targets,
+            "probability": final_probs,
+            "count": final_counts,
         }
         if include_diffs:
-            data["diff_summary"] = diff_summaries
-        return pl.DataFrame(data)
+            data_atomic["diff_summary"] = final_diffs
+        return pl.DataFrame(data_atomic)
 
     def nodes_dataframe(self) -> pl.DataFrame:
         """Returns nodes DataFrame with state_id, marginal stationary probability, and features."""

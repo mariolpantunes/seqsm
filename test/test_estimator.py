@@ -215,6 +215,12 @@ class TestEstimator(unittest.TestCase):
         edges = fsm.edges_dataframe()
         self.assertGreater(len(edges), 0)
 
+    def test_detect_period(self) -> None:
+        model = SeqSM(k=1, feature_cols=["motion", "light"])
+        model.fit(self.df)
+        period = model.detect_period(self.df)
+        self.assertGreaterEqual(period, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

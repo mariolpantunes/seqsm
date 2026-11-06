@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Self
+from typing import Literal, Self
 
 import numpy as np
 import polars as pl
@@ -14,7 +14,7 @@ from numpy.typing import DTypeLike, NDArray
 from seqsm.encoding import StateEncoder
 from seqsm.machine import StateMachine
 from seqsm.markov import KOrderMarkovChain
-from seqsm.motifs import score_anomalies
+from seqsm.motifs import detect_period, score_anomalies
 from seqsm.schedule import ScheduleGenerator
 from seqsm.types import ModeType, PredictionMethod, ScheduleConstraints, ScheduleMethod
 
@@ -365,13 +365,26 @@ class SeqSM:
         # Combine schedule metadata with feature columns
         return pl.concat([base_df, decoded_features], how="horizontal")
 
+    def detect_period(
+        self,
+        df: pl.DataFrame | pl.LazyFrame,
+        timestamp_col: str | None = None,
+    ) -> int:
+        """Detects dominant stream cycle lag in discrete steps via Categorical Match Autocorrelation (CMA)."""
+        _ = timestamp_col
+        if self._encoder is None:
+            raise ValueError("SeqSM has not been fitted.")
+        states = self._encoder.transform(df)
+        return detect_period(states)
+
     def score_anomalies(
         self,
         df: pl.DataFrame | pl.LazyFrame,
         window_size: int = 5,
         threshold_quantile: float = 0.99,
+        mode: Literal["two_factor", "nll"] = "two_factor",
     ) -> pl.DataFrame:
-        """Scores transition anomalies on an input sequence."""
+        """Scores transition and dwell anomalies on an input sequence."""
         if self._chain is None or self._encoder is None:
             raise ValueError("SeqSM has not been fitted.")
         states = self._encoder.transform(df)
@@ -380,6 +393,7 @@ class SeqSM:
             states,
             window_size=window_size,
             threshold_quantile=threshold_quantile,
+            mode=mode,
         )
 
     def to_state_machine(
@@ -387,6 +401,8 @@ class SeqSM:
         min_prob: float | None = None,
         min_count: int | None = None,
         top_k_edges: int | None = None,
+        renormalize: bool = True,
+        mode: Literal["atomic", "debruijn"] = "atomic",
     ) -> StateMachine:
         """Constructs a pruned StateMachine graph representation."""
         if self._chain is None or self._encoder is None:
@@ -399,7 +415,9 @@ class SeqSM:
             min_prob=p,
             min_count=c,
             top_k_edges=top_k_edges,
+            renormalize=renormalize,
+            mode=mode,
         )
 
 
-__all__ = ["SeqSM"]
+__all__ = ["SeqSM", "parse_duration"]
