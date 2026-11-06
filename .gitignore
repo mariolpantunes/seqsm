@@ -4,6 +4,7 @@ venv/
 
 # Agent artifacts & plans
 .agents/
+papers/
 
 # Python bytecode & cache
 __pycache__/
