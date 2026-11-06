@@ -143,6 +143,13 @@ class StateEncoder:
         row_tuple = self._id_to_tuple[state_id]
         return dict(zip(self._feature_cols, row_tuple, strict=True))
 
+    def dict_to_state(self, state_dict: dict[str, Any]) -> int:
+        """Maps a feature dictionary back to its integer state ID, or -1 if unseen."""
+        if self._feature_cols is None:
+            raise ValueError("StateEncoder has not been fitted.")
+        row_tuple = tuple(state_dict.get(c) for c in self._feature_cols)
+        return self._tuple_to_id.get(row_tuple, -1)
+
     def state_diff(self, from_state: int, to_state: int) -> dict[str, tuple[Any, Any]]:
         """Returns the mapping of features that changed between from_state and to_state."""
         d_from = self.state_to_dict(from_state)
