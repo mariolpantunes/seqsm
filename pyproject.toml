@@ -39,10 +39,14 @@ nmf = [
 opt = [
     "pyBlindOpt>=0.5.0",
 ]
+plot = [
+    "matplotlib>=3.11.2",
+]
 
 [dependency-groups]
 test = [
     "coverage==7.17.2",
+    "matplotlib>=3.11.2",
 ]
 lint = [
     "ruff==0.17.1",

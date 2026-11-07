@@ -354,6 +354,31 @@ class TestEstimator(unittest.TestCase):
         self.assertIsInstance(p_raw, np.ndarray)
         np.testing.assert_array_equal(p_raw, probs_attested)
 
+    def test_estimator_repr_str_and_plot_and_similarity(self) -> None:
+        model = SeqSM(k=1, feature_cols=["motion", "light"])
+        self.assertIn("fitted=False", repr(model))
+        self.assertIn("not fitted", str(model))
+
+        model.fit(self.df)
+        self.assertIn("fitted=True", repr(model))
+        self.assertIn("SeqSM Estimator", str(model))
+        self.assertIn("StateMachine", str(model))
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        ret_ax = model.plot_state_machine(ax=ax)
+        self.assertIs(ret_ax, ax)
+        plt.close(fig)
+
+        model2 = SeqSM(k=1, feature_cols=["motion", "light"])
+        model2.fit(self.df)
+        sim = model.compare_similarity(model2)
+        self.assertAlmostEqual(sim["overall_similarity"], 1.0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -109,6 +109,54 @@ class TestStateMachine(unittest.TestCase):
         # Cycles found across rotations accumulate frequency
         self.assertGreaterEqual(cycles[0].frequency, 1)
 
+    def test_state_machine_repr_and_str(self) -> None:
+        repr_str = repr(self.fsm)
+        self.assertIn("StateMachine(", repr_str)
+        self.assertIn("n_states=", repr_str)
+
+        summary_str = str(self.fsm)
+        self.assertIn("StateMachine", summary_str)
+        self.assertIn("States (Marginal Stationary Distribution):", summary_str)
+        self.assertIn("Top Transitions", summary_str)
+        self.assertEqual(summary_str, self.fsm.summary())
+
+    def test_to_plot_data_and_plot(self) -> None:
+        plot_data = self.fsm.to_plot_data(layout="circular", include_diffs=True)
+        self.assertGreater(len(plot_data.nodes), 0)
+        self.assertGreater(len(plot_data.edges), 0)
+
+        # Verify node properties
+        n0 = plot_data.nodes[0]
+        self.assertIsInstance(n0.x, float)
+        self.assertIsInstance(n0.y, float)
+        self.assertGreater(n0.size, 0.0)
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+
+        fig, ax = plt.subplots(figsize=(6, 6))
+        returned_ax = self.fsm.plot(ax=ax, show_edge_labels=True, show_diffs=True)
+        self.assertIs(returned_ax, ax)
+        plt.close(fig)
+
+    def test_compare_similarity_identical_and_different(self) -> None:
+        sim_self = self.fsm.compare_similarity(self.fsm)
+        self.assertAlmostEqual(sim_self["stationary_cosine"], 1.0)
+        self.assertAlmostEqual(sim_self["stationary_jsd"], 0.0)
+        self.assertAlmostEqual(sim_self["edge_jaccard"], 1.0)
+        self.assertAlmostEqual(sim_self["transition_mae"], 0.0)
+        self.assertAlmostEqual(sim_self["overall_similarity"], 1.0)
+
+        # Different FSM
+        other_chain = KOrderMarkovChain(k=1)
+        other_chain.fit_from_arrays(np.array([1, 1, 1, 0], dtype=np.int32))
+        other_fsm = StateMachine.from_markov(other_chain, self.encoder, min_prob=0.0)
+        sim_diff = self.fsm.compare_similarity(other_fsm)
+        self.assertLess(sim_diff["overall_similarity"], 1.0)
+        self.assertGreaterEqual(sim_diff["overall_similarity"], 0.0)
+
 
 if __name__ == "__main__":
     unittest.main()

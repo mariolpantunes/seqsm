@@ -8,8 +8,9 @@ import numpy as np
 import polars as pl
 
 from seqsm.encoding import StateEncoder
+from seqsm.linalg import jensen_shannon_divergence
 from seqsm.markov import KOrderMarkovChain
-from seqsm.types import RoutineCycle
+from seqsm.types import PlotEdge, PlotNode, RoutineCycle, StatePlotData
 
 
 class StateMachine:
@@ -280,6 +281,295 @@ class StateMachine:
 
         lines.append("}")
         return "\n".join(lines)
+
+    def summary(self, top_n: int = 10) -> str:
+        """Returns a formatted human-readable summary of states, top transitions, and routine cycles."""
+        nodes = self.nodes_dataframe()
+        edges = self.edges_dataframe(include_diffs=True)
+        n_states = len(nodes)
+        n_edges = len(edges)
+
+        lines: list[str] = [
+            f"StateMachine (mode={self._mode}, {n_states} states, {n_edges} transitions, min_prob={self._min_prob:.2f}):",
+            "States (Marginal Stationary Distribution):",
+        ]
+
+        nodes_sorted = nodes.sort("stationary_prob", descending=True)
+        vocab_cols = [c for c in nodes.columns if c not in ("state_id", "stationary_prob")]
+
+        for row in nodes_sorted.iter_rows(named=True):
+            sid = row["state_id"]
+            p = row["stationary_prob"]
+            feat_strs = [f"{col}={row[col]}" for col in vocab_cols]
+            desc = ", ".join(feat_strs)
+            lines.append(f"  S{sid} (p={p:.3f}): {desc}")
+
+        lines.append(f"Top Transitions (ranked by probability, up to {top_n}):")
+        if n_edges == 0:
+            lines.append("  (no transitions meeting min_prob/min_count thresholds)")
+        else:
+            edges_sorted = edges.sort("probability", descending=True).head(top_n)
+            for row in edges_sorted.iter_rows(named=True):
+                src = row["source_id"]
+                tgt = row["target_id"]
+                prob = row["probability"]
+                count = row["count"]
+                diff = row.get("diff_summary", "")
+                diff_str = f" [{diff}]" if diff else ""
+                lines.append(f"  S{src} -> S{tgt} (p={prob:.3f}, count={count}){diff_str}")
+
+        cycles = self.extract_cycles(max_length=6, top_n=5)
+        if cycles:
+            lines.append("Prominent Routine Cycles:")
+            for c in cycles:
+                seq_str = " -> ".join(f"S{s}" for s in c.state_sequence) + f" -> S{c.state_sequence[0]}"
+                lines.append(f"  Cycle ({seq_str}): persistence={c.persistence:.4f}, period={c.period}")
+
+        return "\n".join(lines)
+
+    def __repr__(self) -> str:
+        nodes = self.nodes_dataframe()
+        edges = self.edges_dataframe(include_diffs=False)
+        return (
+            f"StateMachine(mode={self._mode!r}, n_states={len(nodes)}, n_edges={len(edges)}, min_prob={self._min_prob})"
+        )
+
+    def __str__(self) -> str:
+        return self.summary()
+
+    def to_plot_data(
+        self,
+        layout: Literal["circular", "random"] = "circular",
+        node_color: str = "#0284C7",
+        min_prob: float | None = None,
+        include_diffs: bool = True,
+    ) -> StatePlotData:
+        """Constructs a decoupled StatePlotData structure containing nodes and edges for Matplotlib rendering."""
+        effective_min_prob = self._min_prob if min_prob is None else min_prob
+        nodes_df = self.nodes_dataframe()
+        edges_df = self.edges_dataframe(include_diffs=include_diffs)
+
+        n_nodes = len(nodes_df)
+        if n_nodes == 0:
+            return StatePlotData(nodes=(), edges=(), title="Empty State Machine")
+
+        positions: dict[int, tuple[float, float]] = {}
+        if layout == "circular":
+            for i, row in enumerate(nodes_df.iter_rows(named=True)):
+                sid = int(row["state_id"])
+                angle = (np.pi / 2.0) - (2.0 * np.pi * i / max(1, n_nodes))
+                positions[sid] = (float(np.cos(angle)), float(np.sin(angle)))
+        else:
+            rng = np.random.default_rng(42)
+            for row in nodes_df.iter_rows(named=True):
+                sid = int(row["state_id"])
+                positions[sid] = (float(rng.uniform(-0.9, 0.9)), float(rng.uniform(-0.9, 0.9)))
+
+        plot_nodes: list[PlotNode] = []
+        vocab_cols = [c for c in nodes_df.columns if c not in ("state_id", "stationary_prob")]
+
+        for row in nodes_df.iter_rows(named=True):
+            sid = int(row["state_id"])
+            p_val = float(row["stationary_prob"])
+            x, y = positions[sid]
+            size = float(0.10 + 0.16 * np.sqrt(max(0.0, p_val)))
+            feats = {col: row[col] for col in vocab_cols}
+            plot_nodes.append(
+                PlotNode(
+                    id=sid,
+                    label=f"S{sid}",
+                    x=x,
+                    y=y,
+                    size=size,
+                    color=node_color,
+                    stationary_prob=p_val,
+                    features=feats,
+                )
+            )
+
+        plot_edges: list[PlotEdge] = []
+        for row in edges_df.iter_rows(named=True):
+            prob = float(row["probability"])
+            if prob < effective_min_prob:
+                continue
+            src = int(row["source_id"])
+            tgt = int(row["target_id"])
+            if src not in positions or tgt not in positions:
+                continue
+
+            count = int(row["count"])
+            diff = row.get("diff_summary")
+            lbl = f"{prob:.2f}"
+
+            plot_edges.append(
+                PlotEdge(
+                    source_id=src,
+                    target_id=tgt,
+                    source_pos=positions[src],
+                    target_pos=positions[tgt],
+                    probability=prob,
+                    count=count,
+                    label=lbl,
+                    diff_summary=str(diff) if diff else None,
+                )
+            )
+
+        return StatePlotData(
+            nodes=tuple(plot_nodes),
+            edges=tuple(plot_edges),
+            title=f"State Machine ({n_nodes} states, {len(plot_edges)} transitions)",
+        )
+
+    def plot(
+        self,
+        ax: Any = None,
+        layout: Literal["circular", "random"] = "circular",
+        min_prob: float | None = None,
+        figsize: tuple[float, float] = (10, 8),
+        node_color: str = "#0284C7",
+        edge_color: str = "#475569",
+        show_edge_labels: bool = True,
+        show_diffs: bool = False,
+        title: str | None = None,
+    ) -> Any:
+        """Renders the state machine graph onto a Matplotlib Axes."""
+        plot_data = self.to_plot_data(layout=layout, node_color=node_color, min_prob=min_prob, include_diffs=show_diffs)
+        return plot_data.plot(
+            ax=ax,
+            figsize=figsize,
+            node_color=node_color,
+            edge_color=edge_color,
+            show_edge_labels=show_edge_labels,
+            show_diffs=show_diffs,
+            title=title,
+        )
+
+    def compare_similarity(self, other: StateMachine) -> dict[str, float]:
+        """Calculates multi-aspect structural and probabilistic similarity metrics against another StateMachine."""
+        enc_self = self._encoder
+        enc_other = other._encoder
+
+        shared_features = (
+            enc_self.feature_cols is not None
+            and enc_other.feature_cols is not None
+            and set(enc_self.feature_cols) == set(enc_other.feature_cols)
+        )
+
+        mu_self = self._chain.marginal_stationary_distribution()
+        mu_other = other._chain.marginal_stationary_distribution()
+        edges_self_df = self.edges_dataframe(include_diffs=False)
+        edges_other_df = other.edges_dataframe(include_diffs=False)
+
+        if shared_features:
+            common_cols = sorted(enc_self.feature_cols)
+
+            def get_tup_self(sid: int) -> tuple[Any, ...]:
+                if sid < 0 or sid >= enc_self.n_states:
+                    return (f"unknown_{sid}",)
+                try:
+                    d = enc_self.state_to_dict(sid)
+                    return tuple(d[c] for c in common_cols)
+                except KeyError:
+                    return (f"unknown_{sid}",)
+
+            def get_tup_other(sid: int) -> tuple[Any, ...]:
+                if sid < 0 or sid >= enc_other.n_states:
+                    return (f"unknown_{sid}",)
+                try:
+                    d = enc_other.state_to_dict(sid)
+                    return tuple(d[c] for c in common_cols)
+                except KeyError:
+                    return (f"unknown_{sid}",)
+
+            tups_self = [get_tup_self(i) for i in range(enc_self.n_states)]
+            tups_other = [get_tup_other(i) for i in range(enc_other.n_states)]
+
+            canonical_tuples = sorted(set(tups_self) | set(tups_other))
+            tup_to_canonical = {t: idx for idx, t in enumerate(canonical_tuples)}
+            num_canonical = len(canonical_tuples)
+
+            p_self = np.zeros(num_canonical, dtype=np.float64)
+            for i, p_val in enumerate(mu_self):
+                if i < len(tups_self):
+                    p_self[tup_to_canonical[tups_self[i]]] = p_val
+
+            p_other = np.zeros(num_canonical, dtype=np.float64)
+            for i, p_val in enumerate(mu_other):
+                if i < len(tups_other):
+                    p_other[tup_to_canonical[tups_other[i]]] = p_val
+
+            edges_self = {
+                (
+                    tup_to_canonical[get_tup_self(int(r["source_id"]))],
+                    tup_to_canonical[get_tup_self(int(r["target_id"]))],
+                )
+                for r in edges_self_df.iter_rows(named=True)
+            }
+            edges_other = {
+                (
+                    tup_to_canonical[get_tup_other(int(r["source_id"]))],
+                    tup_to_canonical[get_tup_other(int(r["target_id"]))],
+                )
+                for r in edges_other_df.iter_rows(named=True)
+            }
+
+            prob_self = {
+                (
+                    tup_to_canonical[get_tup_self(int(r["source_id"]))],
+                    tup_to_canonical[get_tup_self(int(r["target_id"]))],
+                ): float(r["probability"])
+                for r in edges_self_df.iter_rows(named=True)
+            }
+            prob_other = {
+                (
+                    tup_to_canonical[get_tup_other(int(r["source_id"]))],
+                    tup_to_canonical[get_tup_other(int(r["target_id"]))],
+                ): float(r["probability"])
+                for r in edges_other_df.iter_rows(named=True)
+            }
+        else:
+            max_s = max(len(mu_self), len(mu_other))
+            p_self = np.pad(mu_self, (0, max_s - len(mu_self)))
+            p_other = np.pad(mu_other, (0, max_s - len(mu_other)))
+
+            edges_self = {(int(r["source_id"]), int(r["target_id"])) for r in edges_self_df.iter_rows(named=True)}
+            edges_other = {(int(r["source_id"]), int(r["target_id"])) for r in edges_other_df.iter_rows(named=True)}
+
+            prob_self = {
+                (int(r["source_id"]), int(r["target_id"])): float(r["probability"])
+                for r in edges_self_df.iter_rows(named=True)
+            }
+            prob_other = {
+                (int(r["source_id"]), int(r["target_id"])): float(r["probability"])
+                for r in edges_other_df.iter_rows(named=True)
+            }
+
+        jsd = jensen_shannon_divergence(p_self, p_other)
+
+        norm_self = float(np.linalg.norm(p_self))
+        norm_other = float(np.linalg.norm(p_other))
+        denom = norm_self * norm_other
+        cosine_sim = float(np.dot(p_self, p_other) / denom) if denom > 1e-12 else 0.0
+
+        union = edges_self | edges_other
+        intersect = edges_self & edges_other
+        edge_jaccard = float(len(intersect) / max(1, len(union)))
+
+        if intersect:
+            diffs = [abs(prob_self[e] - prob_other[e]) for e in intersect]
+            mae = float(np.mean(diffs))
+        else:
+            mae = 1.0
+
+        overall_similarity = float(max(0.0, min(1.0, 0.5 * cosine_sim + 0.5 * edge_jaccard)))
+
+        return {
+            "stationary_jsd": float(jsd),
+            "stationary_cosine": float(cosine_sim),
+            "edge_jaccard": float(edge_jaccard),
+            "transition_mae": float(mae),
+            "overall_similarity": float(overall_similarity),
+        }
 
 
 __all__ = ["StateMachine"]

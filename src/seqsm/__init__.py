@@ -9,9 +9,12 @@ from seqsm.motifs import compare_chains, score_anomalies
 from seqsm.schedule import ScheduleGenerator
 from seqsm.types import (
     DwellDistribution,
+    PlotEdge,
+    PlotNode,
     RoutineCycle,
     ScheduleConstraints,
     ScheduleTrajectory,
+    StatePlotData,
 )
 
 __version__ = "0.1.0"
@@ -20,6 +23,8 @@ __all__ = [
     "DwellDistribution",
     "KOrderMarkovChain",
     "KWindowEncoder",
+    "PlotEdge",
+    "PlotNode",
     "RoutineCycle",
     "ScheduleConstraints",
     "ScheduleGenerator",
@@ -27,6 +32,7 @@ __all__ = [
     "SeqSM",
     "StateEncoder",
     "StateMachine",
+    "StatePlotData",
     "VariableOrderMarkovChain",
     "compare_chains",
     "export_schedule_parquet",

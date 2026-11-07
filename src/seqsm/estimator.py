@@ -493,5 +493,48 @@ class SeqSM:
             mode=mode,
         )
 
+    def plot_state_machine(
+        self,
+        ax: Any = None,
+        layout: Literal["circular", "random"] = "circular",
+        min_prob: float | None = None,
+        figsize: tuple[float, float] = (10, 8),
+        node_color: str = "#0284C7",
+        edge_color: str = "#475569",
+        show_edge_labels: bool = True,
+        show_diffs: bool = False,
+        title: str | None = None,
+    ) -> Any:
+        """Convenience method to construct and render the state machine onto Matplotlib."""
+        fsm = self.to_state_machine(min_prob=min_prob)
+        return fsm.plot(
+            ax=ax,
+            layout=layout,
+            min_prob=min_prob,
+            figsize=figsize,
+            node_color=node_color,
+            edge_color=edge_color,
+            show_edge_labels=show_edge_labels,
+            show_diffs=show_diffs,
+            title=title,
+        )
+
+    def compare_similarity(self, other: SeqSM) -> dict[str, float]:
+        """Calculates multi-aspect similarity metrics against another fitted SeqSM estimator."""
+        fsm_self = self.to_state_machine()
+        fsm_other = other.to_state_machine()
+        return fsm_self.compare_similarity(fsm_other)
+
+    def __repr__(self) -> str:
+        fitted = self._chain is not None and self._encoder is not None
+        n_states = self._encoder.n_states if self._encoder is not None else 0
+        return f"SeqSM(k={self.k}, mode={self.mode!r}, min_prob={self.min_prob}, fitted={fitted}, n_states={n_states})"
+
+    def __str__(self) -> str:
+        if self._chain is None or self._encoder is None:
+            return f"SeqSM Estimator (k={self.k}, mode='{self.mode}', not fitted)"
+        fsm = self.to_state_machine()
+        return f"SeqSM Estimator (k={self.k}, mode='{self.mode}'):\n{fsm}"
+
 
 __all__ = ["SeqSM", "parse_duration"]

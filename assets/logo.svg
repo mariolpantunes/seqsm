@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 540 140" width="100%" height="100%">
+  <defs>
+    <!-- Background / Node Gradients -->
+    <linearGradient id="gradSeq" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284C7" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+    <linearGradient id="gradSM" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0EA5E9" />
+      <stop offset="100%" stop-color="#38BDF8" />
+    </linearGradient>
+    <linearGradient id="nodeGrad1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284C7" />
+      <stop offset="100%" stop-color="#0369A1" />
+    </linearGradient>
+    <linearGradient id="nodeGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0D9488" />
+      <stop offset="100%" stop-color="#0F766E" />
+    </linearGradient>
+    <linearGradient id="nodeGrad3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6366F1" />
+      <stop offset="100%" stop-color="#4F46E5" />
+    </linearGradient>
+    <linearGradient id="nodeGrad4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#F59E0B" />
+      <stop offset="100%" stop-color="#D97706" />
+    </linearGradient>
+
+    <!-- Marker Arrowheads -->
+    <marker id="arrowTeal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#0D9488" />
+    </marker>
+    <marker id="arrowBlue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#0284C7" />
+    </marker>
+    <marker id="arrowIndigo" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#6366F1" />
+    </marker>
+    <marker id="arrowAmber" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#F59E0B" />
+    </marker>
+
+    <!-- Glow Filter -->
+    <filter id="softGlow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="3" flood-opacity="0.18" flood-color="#0284C7" />
+    </filter>
+  </defs>
+
+  <!-- Left Icon: Directed State Machine Graph -->
+  <g transform="translate(10, 10)">
+    <!-- Directed Transition Arcs -->
+    <!-- S0(40,30) -> S1(110,30) -->
+    <path d="M 46 24 C 65 10, 85 10, 102 24" fill="none" stroke="#0D9488" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowTeal)" />
+
+    <!-- S1(110,30) -> S2(110,95) -->
+    <path d="M 115 38 C 128 55, 128 72, 116 88" fill="none" stroke="#6366F1" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowIndigo)" />
+
+    <!-- S2(110,95) -> S3(40,95) -->
+    <path d="M 102 101 C 85 114, 65 114, 48 101" fill="none" stroke="#F59E0B" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowAmber)" />
+
+    <!-- S3(40,95) -> S0(40,30) -->
+    <path d="M 34 88 C 22 72, 22 55, 34 38" fill="none" stroke="#0284C7" stroke-width="2.5" stroke-linecap="round" marker-end="url(#arrowBlue)" />
+
+    <!-- Diagonal Transition S1(110,30) -> S3(40,95) -->
+    <path d="M 100 39 L 52 87" fill="none" stroke="#94A3B8" stroke-dasharray="3 3" stroke-width="1.75" stroke-linecap="round" />
+
+    <!-- Self loop on S0(40,30) -->
+    <path d="M 28 22 C 12 10, 10 35, 26 35" fill="none" stroke="#0284C7" stroke-width="1.8" stroke-linecap="round" />
+
+    <!-- Node S0 -->
+    <circle cx="40" cy="30" r="16" fill="url(#nodeGrad1)" filter="url(#softGlow)" />
+    <text x="40" y="34.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">S₀</text>
+
+    <!-- Node S1 -->
+    <circle cx="110" cy="30" r="15" fill="url(#nodeGrad2)" filter="url(#softGlow)" />
+    <text x="110" y="34.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">S₁</text>
+
+    <!-- Node S2 -->
+    <circle cx="110" cy="95" r="14" fill="url(#nodeGrad3)" filter="url(#softGlow)" />
+    <text x="110" y="99.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">S₂</text>
+
+    <!-- Node S3 -->
+    <circle cx="40" cy="95" r="13" fill="url(#nodeGrad4)" filter="url(#softGlow)" />
+    <text x="40" y="99.5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="11" font-weight="700" fill="#FFFFFF" text-anchor="middle">S₃</text>
+  </g>
+
+  <!-- Divider Line -->
+  <line x1="162" y1="24" x2="162" y2="116" stroke="#E2E8F0" stroke-width="1.5" stroke-linecap="round" />
+
+  <!-- Right Typography -->
+  <g transform="translate(182, 0)">
+    <!-- Brand Name -->
+    <text x="0" y="74" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="48" font-weight="800" letter-spacing="-1">
+      <tspan fill="#0F172A">Seq</tspan><tspan fill="url(#gradSeq)">SM</tspan>
+    </text>
+
+    <!-- Tagline / Descriptor -->
+    <text x="2" y="98" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif" font-size="13" font-weight="600" fill="#64748B" letter-spacing="0.3">
+      Sequential State Machines &amp; Markov Chains
+    </text>
+
+    <!-- Tech Badges / Pills -->
+    <g transform="translate(2, 108)">
+      <!-- Pill 1: Polars -->
+      <rect x="0" y="0" width="46" height="15" rx="3" fill="#F1F5F9" />
+      <text x="23" y="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="600" fill="#334155" text-anchor="middle">Polars</text>
+
+      <!-- Pill 2: NumPy -->
+      <rect x="52" y="0" width="48" height="15" rx="3" fill="#F1F5F9" />
+      <text x="76" y="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="600" fill="#334155" text-anchor="middle">NumPy</text>
+
+      <!-- Pill 3: Numba -->
+      <rect x="106" y="0" width="46" height="15" rx="3" fill="#F1F5F9" />
+      <text x="129" y="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="600" fill="#334155" text-anchor="middle">Numba</text>
+
+      <!-- Pill 4: SOTA Markov -->
+      <rect x="158" y="0" width="80" height="15" rx="3" fill="#F1F5F9" />
+      <text x="198" y="11" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="9" font-weight="600" fill="#334155" text-anchor="middle">De Bruijn K-Order</text>
+    </g>
+  </g>
+</svg>

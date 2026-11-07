@@ -493,6 +493,22 @@ class KOrderMarkovChain:
         """Computes perplexity = 2^(H(S))."""
         return model_perplexity(self.entropy_rate())
 
+    def __repr__(self) -> str:
+        fitted = self._transition_matrix is not None
+        return (
+            f"KOrderMarkovChain(k={self._k}, mode={self._mode!r}, "
+            f"n_windows={self.n_windows}, n_states={self._n_states}, fitted={fitted})"
+        )
+
+    def __str__(self) -> str:
+        fitted = self._transition_matrix is not None
+        if not fitted:
+            return f"KOrderMarkovChain(k={self._k}, mode='{self._mode}', not fitted)"
+        return (
+            f"KOrderMarkovChain(k={self._k}, mode='{self._mode}', "
+            f"{self.n_windows} observed windows, {self._n_states} atomic states)"
+        )
+
 
 class VariableOrderMarkovChain:
     """Variable-order Markov chain combining models of order 1..max_k via backoff or interpolation."""
@@ -598,6 +614,30 @@ class VariableOrderMarkovChain:
 
         # Fallback to order 1 marginal
         return self._chains[0].marginal_stationary_distribution()
+
+    @property
+    def n_states(self) -> int:
+        """Returns the atomic state space cardinality |S|."""
+        return self._chains[0].n_states if self.fitted else 0
+
+    @property
+    def fitted(self) -> bool:
+        """Returns True if the variable order chain has been fitted."""
+        return len(self._chains) > 0 and self._chains[0]._transition_matrix is not None
+
+    def __repr__(self) -> str:
+        return (
+            f"VariableOrderMarkovChain(max_k={self._max_k}, backoff={self._backoff!r}, "
+            f"mode={self._mode!r}, fitted={self.fitted})"
+        )
+
+    def __str__(self) -> str:
+        if not self.fitted:
+            return f"VariableOrderMarkovChain(max_k={self._max_k}, backoff='{self._backoff}', not fitted)"
+        return (
+            f"VariableOrderMarkovChain(max_k={self._max_k}, backoff='{self._backoff}', "
+            f"orders 1..{self._max_k}, {self.n_states} atomic states)"
+        )
 
 
 __all__ = ["KOrderMarkovChain", "VariableOrderMarkovChain"]

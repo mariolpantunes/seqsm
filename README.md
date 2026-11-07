@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="SeqSM Logo" width="540" />
+</p>
+
 # seqsm: Sequential State Machines & $K$-Order Markov Chains
 
 `seqsm` is a domain-agnostic, high-performance Python library designed to learn, analyze, reduce, and simulate **$K$-order Markov Chains** and **Finite State Machines (FSMs)** from aligned multivariate discrete sequences. It features an intuitive Scikit-Learn-style estimator interface (`SeqSM`) with `fit`, `predict`, and `generate_schedule` methods.
@@ -14,7 +18,8 @@
   - `mode="clock"`: Uniform discrete time steps $\Delta t$, retaining self-transitions.
   - `mode="event"`: Semi-Markov run-length collapse of consecutive identical states into visits paired with empirical dwell-time distributions ($F_{\text{dwell}}$).
 - **Valid-Arc Schedule Rollouts:** Graph pruning ($P_{uv} \ge \tau_{\text{prob}}$, $C_{uv} \ge \tau_{\text{count}}$) with fast Numba JIT simulation to produce synthetic schedules that strictly honor learned physical constraints.
-- **Interpretable FSM Graphs:** Direct export to Mermaid flowcharts and Graphviz DOT digraphs with cycle extraction and edge difference summaries.
+- **Interpretable FSM Graphs & Visualization:** Direct string printing (`__str__` / `summary()`), native Matplotlib graph visualization (`fsm.plot()`), and exports to Mermaid flowcharts and Graphviz DOT digraphs with cycle extraction and edge difference summaries.
+- **Generative Fidelity & Similarity:** Multi-aspect model comparison (`compare_similarity`) evaluating Jensen-Shannon divergence, stationary cosine similarity, directed edge Jaccard index, and transition concordance.
 
 ---
 

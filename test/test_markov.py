@@ -404,6 +404,23 @@ class TestVariableOrderMarkovChain(unittest.TestCase):
         pi_after_partial = chain.stationary_distribution(tol=1e-2, max_iter=5)
         self.assertIsNot(pi_relaxed, pi_after_partial)
 
+    def test_markov_chain_repr_and_str(self) -> None:
+        chain = KOrderMarkovChain(k=2)
+        self.assertIn("fitted=False", repr(chain))
+        self.assertIn("not fitted", str(chain))
+
+        chain.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))
+        self.assertIn("fitted=True", repr(chain))
+        self.assertIn("observed windows", str(chain))
+
+        vom = VariableOrderMarkovChain(max_k=2)
+        self.assertIn("fitted=False", repr(vom))
+        self.assertIn("not fitted", str(vom))
+
+        vom.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))
+        self.assertIn("fitted=True", repr(vom))
+        self.assertIn("orders 1..2", str(vom))
+
 
 if __name__ == "__main__":
     unittest.main()
