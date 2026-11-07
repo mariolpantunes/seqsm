@@ -172,7 +172,25 @@ class StateMachine:
         return vocab.with_columns(prob_series)
 
     def extract_cycles(self, max_length: int = 8, top_n: int = 10) -> list[RoutineCycle]:
-        """Extracts prominent routine cycles in the state machine graph using DFS path search."""
+        """Extracts prominent routine cycles in the state machine graph using DFS path search.
+
+        Note:
+            Cycle search uses a depth-first traversal bounded by `max_length`. In dense or
+            highly connected transition graphs, path expansion exhibits worst-case exponential
+            complexity O(|V| * Δ^L), where Δ is the maximum out-degree and L is `max_length`.
+            For large state spaces or dense graphs, keep `max_length` <= 8 to avoid explosive
+            search times.
+
+        Args:
+            max_length: Maximum path length (depth) for cycle discovery. Must be >= 2.
+            top_n: Number of top cycles to return, ranked by persistence (probability product).
+
+        Returns:
+            List of `RoutineCycle` dataclass instances sorted by descending persistence.
+        """
+        if max_length < 2 or top_n <= 0:
+            return []
+
         edges = self.edges_dataframe(include_diffs=False)
         if len(edges) == 0:
             return []

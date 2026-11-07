@@ -18,7 +18,15 @@ BackoffMethod = Literal["witten_bell", "linear", "tuned"]
 
 @dataclass(frozen=True)
 class CSRMatrix:
-    """Compressed Sparse Row matrix representation."""
+    """Compressed Sparse Row (CSR) matrix representation.
+
+    Note:
+        Row pointers (`indptr`) and column indices (`indices`) are explicitly stored as
+        32-bit signed integers (`np.int32`) to optimize cache locality and ensure direct
+        compatibility with Numba JIT kernels. Consequently, the maximum number of non-zero
+        elements (nnz) and maximum dimension size are bounded by 2^31 - 1 (~2.14 billion entries).
+        For models exceeding this threshold, 64-bit sparse structures would be required.
+    """
 
     data: NDArray[np.float64]
     indices: NDArray[np.int32]

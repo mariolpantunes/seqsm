@@ -208,51 +208,47 @@ class KWindowEncoder:
         else:
             ep_arr = None
 
-        valid_windows: list[tuple[int, ...]] = []
-        source_tuples: list[tuple[int, ...]] = []
-        target_states: list[int] = []
-        time_idxs: list[int] = []
+        if n < self._k + 1:
+            self._window_to_id = {}
+            self._id_to_window = {}
+            self._cached_k_tuples = None
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
-        # Find transitions w_t -> s_{t+1}
-        for t in range(self._k - 1, n - 1):
-            target = int(states_arr[t + 1])
-            if target < 0:
-                continue
+        # Sliding window views for fast vectorized filtering
+        windows = np.lib.stride_tricks.sliding_window_view(states_arr[:-1], window_shape=self._k)
+        targets = states_arr[self._k :]
+        time_idxs = np.arange(self._k - 1, n - 1, dtype=np.int32)
 
-            if ep_arr is not None and ep_arr[t + 1] != ep_arr[t]:
-                continue
+        valid_mask = targets >= 0
+        if np.any(valid_mask):
+            valid_mask &= np.all(windows >= 0, axis=1)
 
-            # Check window validity
-            start = t - self._k + 1
-            win_states = tuple(int(states_arr[idx]) for idx in range(start, t + 1))
-            if any(s < 0 for s in win_states):
-                continue
+        if ep_arr is not None and np.any(valid_mask):
+            ep_windows = np.lib.stride_tricks.sliding_window_view(ep_arr[:-1], window_shape=self._k)
+            ep_targets = ep_arr[self._k :]
+            valid_mask &= (ep_targets == ep_windows[:, -1]) & np.all(ep_windows == ep_windows[:, :1], axis=1)
 
-            if ep_arr is not None:
-                first_ep = ep_arr[start]
-                if any(ep_arr[idx] != first_ep for idx in range(start + 1, t + 1)):
-                    continue
+        filtered_windows = windows[valid_mask]
+        filtered_targets = targets[valid_mask]
+        filtered_times = time_idxs[valid_mask]
 
-            valid_windows.append(win_states)
-            source_tuples.append(win_states)
-            target_states.append(target)
-            time_idxs.append(t)
+        if len(filtered_windows) == 0:
+            self._window_to_id = {}
+            self._id_to_window = {}
+            self._cached_k_tuples = None
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+        source_tuples = [tuple(int(x) for x in row) for row in filtered_windows]
 
         # Unique windows sorted for determinism
-        unique_windows = sorted(set(valid_windows))
+        unique_windows = sorted(set(source_tuples))
         self._window_to_id = {win: idx for idx, win in enumerate(unique_windows)}
         self._id_to_window = {idx: win for idx, win in enumerate(unique_windows)}
         self._cached_k_tuples = None
 
-        m = len(source_tuples)
-        sources_u = np.empty(m, dtype=np.int32)
-        targets_v = np.empty(m, dtype=np.int32)
-        time_arr = np.empty(m, dtype=np.int32)
-
-        for i in range(m):
-            sources_u[i] = self._window_to_id[source_tuples[i]]
-            targets_v[i] = target_states[i]
-            time_arr[i] = time_idxs[i]
+        sources_u = np.array([self._window_to_id[tup] for tup in source_tuples], dtype=np.int32)
+        targets_v = filtered_targets.astype(np.int32)
+        time_arr = filtered_times.astype(np.int32)
 
         return sources_u, targets_v, time_arr
 
@@ -271,47 +267,41 @@ class KWindowEncoder:
         else:
             ep_arr = None
 
-        source_tuples: list[tuple[int, ...]] = []
-        target_states: list[int] = []
-        time_idxs: list[int] = []
+        if n < self._k + 1:
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
 
-        for t in range(self._k - 1, n - 1):
-            target = int(states_arr[t + 1])
-            if target < 0:
-                continue
+        windows = np.lib.stride_tricks.sliding_window_view(states_arr[:-1], window_shape=self._k)
+        targets = states_arr[self._k :]
+        time_idxs = np.arange(self._k - 1, n - 1, dtype=np.int32)
 
-            if ep_arr is not None and ep_arr[t + 1] != ep_arr[t]:
-                continue
+        valid_mask = targets >= 0
+        if np.any(valid_mask):
+            valid_mask &= np.all(windows >= 0, axis=1)
 
-            start = t - self._k + 1
-            win_states = tuple(int(states_arr[idx]) for idx in range(start, t + 1))
-            if any(s < 0 for s in win_states):
-                continue
+        if ep_arr is not None and np.any(valid_mask):
+            ep_windows = np.lib.stride_tricks.sliding_window_view(ep_arr[:-1], window_shape=self._k)
+            ep_targets = ep_arr[self._k :]
+            valid_mask &= (ep_targets == ep_windows[:, -1]) & np.all(ep_windows == ep_windows[:, :1], axis=1)
 
-            if ep_arr is not None:
-                first_ep = ep_arr[start]
-                if any(ep_arr[idx] != first_ep for idx in range(start + 1, t + 1)):
-                    continue
+        filtered_windows = windows[valid_mask]
+        filtered_targets = targets[valid_mask]
+        filtered_times = time_idxs[valid_mask]
 
-            if win_states not in self._window_to_id:
+        if len(filtered_windows) == 0:
+            return np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32), np.empty(0, dtype=np.int32)
+
+        source_tuples = [tuple(int(x) for x in row) for row in filtered_windows]
+
+        for tup in source_tuples:
+            if tup not in self._window_to_id:
                 new_id = len(self._id_to_window)
-                self._window_to_id[win_states] = new_id
-                self._id_to_window[new_id] = win_states
+                self._window_to_id[tup] = new_id
+                self._id_to_window[new_id] = tup
                 self._cached_k_tuples = None
 
-            source_tuples.append(win_states)
-            target_states.append(target)
-            time_idxs.append(t)
-
-        m = len(source_tuples)
-        sources_u = np.empty(m, dtype=np.int32)
-        targets_v = np.empty(m, dtype=np.int32)
-        time_arr = np.empty(m, dtype=np.int32)
-
-        for i in range(m):
-            sources_u[i] = self._window_to_id[source_tuples[i]]
-            targets_v[i] = target_states[i]
-            time_arr[i] = time_idxs[i]
+        sources_u = np.array([self._window_to_id[tup] for tup in source_tuples], dtype=np.int32)
+        targets_v = filtered_targets.astype(np.int32)
+        time_arr = filtered_times.astype(np.int32)
 
         return sources_u, targets_v, time_arr
 

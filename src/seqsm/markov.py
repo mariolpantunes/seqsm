@@ -55,6 +55,7 @@ class KOrderMarkovChain:
         self._sparse_companion: CSRMatrix | None = None
         self._dwell_stats: dict[int, DwellDistribution] = {}
         self._cached_pi: NDArray[np.float64] | None = None
+        self._cached_pi_params: tuple[float, int] | None = None
         self._cached_mu: NDArray[np.float64] | None = None
 
     @property
@@ -162,6 +163,7 @@ class KOrderMarkovChain:
             eff_dwells = np.empty(0, dtype=np.int32)
 
         self._cached_pi = None
+        self._cached_pi_params = None
         self._cached_mu = None
 
         # Infer state space cardinality
@@ -311,6 +313,7 @@ class KOrderMarkovChain:
             eff_dwells = np.empty(0, dtype=np.int32)
 
         self._cached_pi = None
+        self._cached_pi_params = None
         self._cached_mu = None
 
         if n_states is not None:
@@ -408,15 +411,19 @@ class KOrderMarkovChain:
 
     def stationary_distribution(self, tol: float = 1e-10, max_iter: int = 10_000) -> NDArray[np.float64]:
         """Computes stationary distribution pi over K-windows."""
-        if self._cached_pi is not None and tol == 1e-10 and max_iter == 10_000:
+        if (
+            self._cached_pi is not None
+            and self._cached_pi_params is not None
+            and self._cached_pi_params == (tol, max_iter)
+        ):
             return self._cached_pi
 
         mat = self._companion_matrix if self._companion_matrix is not None else self._sparse_companion
         if mat is None:
             raise ValueError("KOrderMarkovChain has not been fitted.")
         pi = stationary_distribution_power_iteration(mat, tol=tol, max_iter=max_iter)
-        if tol == 1e-10 and max_iter == 10_000:
-            self._cached_pi = pi
+        self._cached_pi = pi
+        self._cached_pi_params = (tol, max_iter)
         return pi
 
     def marginal_stationary_distribution(self) -> NDArray[np.float64]:

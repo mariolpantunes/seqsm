@@ -304,6 +304,56 @@ class TestEstimator(unittest.TestCase):
         period = model.detect_period(df_ts, timestamp_col="ts")
         self.assertGreaterEqual(period, 1)
 
+    def test_predict_proba_diagnostics_n7(self) -> None:
+        model = SeqSM(k=2, feature_cols=["motion", "light"])
+        model.fit(self.df)
+
+        # 1. history is None
+        probs, diag = model.predict_proba(history=None, return_diagnostics=True)
+        self.assertTrue(diag["fallback"])
+        self.assertEqual(diag["reason"], "none_history")
+        self.assertIsNone(diag["window"])
+        self.assertEqual(diag["window_id"], -1)
+        self.assertEqual(len(probs), model.state_encoder.n_states)
+
+        # 2. short history (< k)
+        probs_short, diag_short = model.predict_proba(history=[0], return_diagnostics=True)
+        self.assertTrue(diag_short["fallback"])
+        self.assertEqual(diag_short["reason"], "short_history")
+        self.assertEqual(diag_short["window"], (0,))
+        self.assertEqual(diag_short["window_id"], -1)
+
+        # 3. unseen window
+        all_states = list(range(model.state_encoder.n_states))
+        unseen_win = None
+        for s1 in all_states:
+            for s2 in all_states:
+                if model._chain.encoder.encode_window((s1, s2)) < 0:  # type: ignore[union-attr]
+                    unseen_win = (s1, s2)
+                    break
+            if unseen_win is not None:
+                break
+        self.assertIsNotNone(unseen_win)
+        assert unseen_win is not None
+        probs_unseen, diag_unseen = model.predict_proba(history=list(unseen_win), return_diagnostics=True)
+        self.assertTrue(diag_unseen["fallback"])
+        self.assertEqual(diag_unseen["reason"], "unseen_window")
+        self.assertEqual(diag_unseen["window"], unseen_win)
+        self.assertEqual(diag_unseen["window_id"], -1)
+
+        # 4. attested window
+        attested_win = model._chain.encoder.decode_window(0)  # type: ignore[union-attr]
+        probs_attested, diag_attested = model.predict_proba(history=list(attested_win), return_diagnostics=True)
+        self.assertFalse(diag_attested["fallback"])
+        self.assertIsNone(diag_attested["reason"])
+        self.assertEqual(diag_attested["window"], attested_win)
+        self.assertEqual(diag_attested["window_id"], 0)
+
+        # 5. return_diagnostics=False returns pure array
+        p_raw = model.predict_proba(history=list(attested_win), return_diagnostics=False)
+        self.assertIsInstance(p_raw, np.ndarray)
+        np.testing.assert_array_equal(p_raw, probs_attested)
+
 
 if __name__ == "__main__":
     unittest.main()

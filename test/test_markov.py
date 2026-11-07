@@ -385,6 +385,25 @@ class TestVariableOrderMarkovChain(unittest.TestCase):
         pi3 = chain.stationary_distribution()
         self.assertIsNot(pi1, pi3)
 
+    def test_stationary_distribution_cache_parameter_invalidation_n10(self) -> None:
+        chain = KOrderMarkovChain(k=1)
+        chain.fit_from_arrays(np.array([0, 1, 2, 0, 1, 2], dtype=np.int32))
+
+        pi_default = chain.stationary_distribution(tol=1e-10, max_iter=10_000)
+        pi_default_cached = chain.stationary_distribution(tol=1e-10, max_iter=10_000)
+        self.assertIs(pi_default, pi_default_cached)
+
+        # Different parameters recalculate and cache new result
+        pi_relaxed = chain.stationary_distribution(tol=1e-2, max_iter=5)
+        self.assertIsNot(pi_default, pi_relaxed)
+        pi_relaxed_cached = chain.stationary_distribution(tol=1e-2, max_iter=5)
+        self.assertIs(pi_relaxed, pi_relaxed_cached)
+
+        # Partial fit invalidates cache
+        chain.partial_fit_from_arrays(np.array([2, 0, 1], dtype=np.int32))
+        pi_after_partial = chain.stationary_distribution(tol=1e-2, max_iter=5)
+        self.assertIsNot(pi_relaxed, pi_after_partial)
+
 
 if __name__ == "__main__":
     unittest.main()

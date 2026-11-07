@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from datetime import datetime, timedelta
-from typing import Literal, Self
+from typing import Any, Literal, Self, overload
 
 import numpy as np
 import polars as pl
@@ -195,21 +195,57 @@ class SeqSM:
         )
         return self
 
+    @overload
     def predict_proba(
         self,
         history: pl.DataFrame | Sequence[int] | None = None,
         steps: int = 1,
-    ) -> NDArray[np.float64]:
-        """Returns next-state probability distribution vector of shape (|S|,) or (steps, |S|)."""
+        *,
+        return_diagnostics: Literal[True],
+    ) -> tuple[NDArray[np.float64], dict[str, Any]]: ...
+
+    @overload
+    def predict_proba(
+        self,
+        history: pl.DataFrame | Sequence[int] | None,
+        steps: int,
+        return_diagnostics: Literal[True],
+    ) -> tuple[NDArray[np.float64], dict[str, Any]]: ...
+
+    @overload
+    def predict_proba(
+        self,
+        history: pl.DataFrame | Sequence[int] | None = None,
+        steps: int = 1,
+        return_diagnostics: Literal[False] = False,
+    ) -> NDArray[np.float64]: ...
+
+    def predict_proba(
+        self,
+        history: pl.DataFrame | Sequence[int] | None = None,
+        steps: int = 1,
+        return_diagnostics: bool = False,
+    ) -> NDArray[np.float64] | tuple[NDArray[np.float64], dict[str, Any]]:
+        """Returns next-state probability distribution vector of shape (|S|,) or (steps, |S|).
+
+        Args:
+            history: Optional observation history as a Polars DataFrame or sequence of state IDs.
+            steps: Forecast horizon in time steps (default 1).
+            return_diagnostics: If True, returns a tuple of (probabilities, diagnostics_dict).
+
+        Returns:
+            Probability vector/matrix, or (probs, diagnostics) if return_diagnostics is True.
+        """
         if self._chain is None or self._encoder is None:
             raise ValueError("SeqSM has not been fitted.")
 
         mu = self._chain.marginal_stationary_distribution()
 
         if history is None:
-            if steps == 1:
-                return mu
-            return np.tile(mu, (steps, 1))
+            probs = mu if steps == 1 else np.tile(mu, (steps, 1))
+            if return_diagnostics:
+                return probs, {"fallback": True, "reason": "none_history", "window": None, "window_id": -1}
+            return probs
 
         if isinstance(history, pl.DataFrame):
             hist_states = self._encoder.transform(history)
@@ -219,20 +255,28 @@ class SeqSM:
                 raise ValueError(f"history contains state IDs outside valid range [0, {self._encoder.n_states - 1}].")
 
         if len(hist_states) < self.k:
-            if steps == 1:
-                return mu
-            return np.tile(mu, (steps, 1))
+            probs = mu if steps == 1 else np.tile(mu, (steps, 1))
+            if return_diagnostics:
+                win_partial = tuple(int(x) for x in hist_states) if len(hist_states) > 0 else None
+                return probs, {"fallback": True, "reason": "short_history", "window": win_partial, "window_id": -1}
+            return probs
 
         win = tuple(int(x) for x in hist_states[-self.k :])
         u = self._chain.encoder.encode_window(win)
         if u < 0:
-            if steps == 1:
-                return mu
-            return np.tile(mu, (steps, 1))
+            probs = mu if steps == 1 else np.tile(mu, (steps, 1))
+            if return_diagnostics:
+                return probs, {"fallback": True, "reason": "unseen_window", "window": win, "window_id": -1}
+            return probs
 
         if steps == 1:
-            return self._chain.predict_proba_window(u)
-        return self._chain.multi_step_distribution(u, steps=steps)
+            probs = self._chain.predict_proba_window(u)
+        else:
+            probs = self._chain.multi_step_distribution(u, steps=steps)
+
+        if return_diagnostics:
+            return probs, {"fallback": False, "reason": None, "window": win, "window_id": u}
+        return probs
 
     def predict(
         self,
