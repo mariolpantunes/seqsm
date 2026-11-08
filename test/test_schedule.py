@@ -205,6 +205,29 @@ class TestSchedule(unittest.TestCase):
         self.assertTrue(any(traj.constraint_violated))
         self.assertTrue(len(traj.unmet_mandatory) >= 1)
 
+    def test_regime_kernels_steer_the_rollout(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        chain.fit_from_arrays(np.array([0, 1, 0, 1, 0, 2, 0, 2], dtype=np.int32))
+        to1 = chain.with_counts(np.array([[0.0, 5.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+        to2 = chain.with_counts(np.array([[0.0, 0.0, 5.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+        gen = ScheduleGenerator(chain, self.encoder, regime_chains=[to1, to2])
+        traj = gen.generate(
+            n_steps=6, init_history=np.array([0], dtype=np.int32), regime_at=lambda t: (t // 2) % 2, seed=1
+        )
+        # step 0 (regime 0): 0->1; step 1 (regime 0): 1->0; step 2 (regime 1): 0->2; step 3: 2->0 ...
+        self.assertEqual(traj.state_ids[0], 1)
+        self.assertEqual(traj.state_ids[2], 2)
+        self.assertEqual(traj.state_ids[4], 1)
+
+    def test_regime_at_validation(self) -> None:
+        chain = KOrderMarkovChain(k=1, mode="clock")
+        chain.fit_from_arrays(np.array([0, 1, 0, 2, 0, 1], dtype=np.int32))
+        with self.assertRaises(ValueError):
+            ScheduleGenerator(chain, self.encoder).generate(n_steps=3, regime_at=lambda t: 0)
+        gen = ScheduleGenerator(chain, self.encoder, regime_chains=[chain])
+        with self.assertRaises(ValueError):
+            gen.generate(n_steps=3, regime_at=lambda t: 4)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
 from typing import Any
 
 import numpy as np
@@ -22,6 +23,7 @@ class ScheduleGenerator:
         encoder: StateEncoder,
         min_prob: float = 0.0,
         min_count: int = 1,
+        regime_chains: Sequence[KOrderMarkovChain] | None = None,
     ) -> None:
         self._chain: KOrderMarkovChain = chain
         self._encoder: StateEncoder = encoder
@@ -34,6 +36,13 @@ class ScheduleGenerator:
         self._indptr, self._indices, self._filtered_probs, self._cumprobs = build_valid_arc_csr_njit(
             probs, counts, min_prob, min_count
         )
+
+        # Optional per-regime arc tables (chains share the pooled K-window vocabulary)
+        self._regime_chains: list[KOrderMarkovChain] = list(regime_chains) if regime_chains is not None else []
+        self._regime_csr: list[tuple[Any, Any, Any, Any]] = [
+            build_valid_arc_csr_njit(rc.transition_matrix, rc.count_matrix, min_prob, min_count)
+            for rc in self._regime_chains
+        ]
 
         # Precompute suffix mapping for O(1) hierarchical context backoff
         self._suffix_map: dict[tuple[int, ...], list[int]] = {}
@@ -82,16 +91,22 @@ class ScheduleGenerator:
         method: ScheduleMethod = "sample",
         constraints: ScheduleConstraints | None = None,
         seed: int = 42,
+        regime_at: Callable[[int], int] | None = None,
     ) -> ScheduleTrajectory:
         """
         Executes a valid-arc schedule rollout for n_steps with dynamic constraint satisfaction.
 
         In clock mode, yields exactly n_steps transitions.
         In event mode, simulates events with empirical dwell sampling clamped to n_steps.
+
+        ``regime_at(step)`` maps the slot index at which the next state starts to a regime id; it selects
+        the regime-conditioned kernel (and dwell table) for that transition. It needs ``regime_chains``.
         """
         if n_steps < 1:
             raise ValueError(f"n_steps must be >= 1, got {n_steps}.")
 
+        if regime_at is not None and not self._regime_chains:
+            raise ValueError("regime_at requires the generator to be built with regime_chains.")
         rng = np.random.default_rng(seed)
         k_enc = self._chain.encoder
         k = self._chain.k
@@ -149,19 +164,35 @@ class ScheduleGenerator:
         out_violated: list[bool] = []
 
         total_steps = 0
-        dwell_stats = self._chain.dwell_stats
 
         while total_steps < n_steps:
+            # Resolve the (regime-conditioned) kernel for the transition starting at this slot
+            if regime_at is not None:
+                reg = int(regime_at(total_steps))
+                if not 0 <= reg < len(self._regime_chains):
+                    raise ValueError(f"regime_at returned {reg}, outside [0, {len(self._regime_chains) - 1}].")
+                cur_chain = self._regime_chains[reg]
+                indptr, indices, filtered_probs, cumprobs = self._regime_csr[reg]
+            else:
+                cur_chain = self._chain
+                indptr, indices, filtered_probs, cumprobs = (
+                    self._indptr,
+                    self._indices,
+                    self._filtered_probs,
+                    self._cumprobs,
+                )
+            dwell_stats = cur_chain.dwell_stats
+
             # Candidate arcs for curr_u
-            start_arc = self._indptr[curr_u]
-            end_arc = self._indptr[curr_u + 1]
+            start_arc = indptr[curr_u]
+            end_arc = indptr[curr_u + 1]
             n_arcs = end_arc - start_arc
 
             cands: list[tuple[int, float]] = []
             if n_arcs > 0:
                 for idx in range(start_arc, end_arc):
-                    v = int(self._indices[idx])
-                    p = float(self._filtered_probs[idx])
+                    v = int(indices[idx])
+                    p = float(filtered_probs[idx])
                     if v in forbidden:
                         continue
                     if v in max_dwell and state_dwell_spent.get(v, 0) >= max_dwell[v]:
@@ -217,25 +248,25 @@ class ScheduleGenerator:
                 constraint_violated = True
                 is_valid = False
                 if method in ("map", "constrained"):
-                    best_rel = int(np.argmax(self._filtered_probs[start_arc:end_arc]))
-                    next_v = int(self._indices[start_arc + best_rel])
-                    next_p = float(self._filtered_probs[start_arc + best_rel])
+                    best_rel = int(np.argmax(filtered_probs[start_arc:end_arc]))
+                    next_v = int(indices[start_arc + best_rel])
+                    next_p = float(filtered_probs[start_arc + best_rel])
                 else:
-                    sub_cum = self._cumprobs[start_arc:end_arc]
+                    sub_cum = cumprobs[start_arc:end_arc]
                     rand_val = rng.uniform(0.0, 1.0)
                     rel_idx = int(np.searchsorted(sub_cum, rand_val))
                     rel_idx = min(rel_idx, n_arcs - 1)
-                    next_v = int(self._indices[start_arc + rel_idx])
-                    next_p = float(self._filtered_probs[start_arc + rel_idx])
+                    next_v = int(indices[start_arc + rel_idx])
+                    next_p = float(filtered_probs[start_arc + rel_idx])
             else:
-                next_v = int(np.argmax(self._chain.transition_matrix[curr_u]))
-                next_p = float(self._chain.transition_matrix[curr_u, next_v])
+                next_v = int(np.argmax(cur_chain.transition_matrix[curr_u]))
+                next_p = float(cur_chain.transition_matrix[curr_u, next_v])
                 is_valid = False
                 constraint_violated = True
 
             # Dwell duration resolution & clamping (H5, M5, N1)
             rem = n_steps - total_steps
-            if self._chain.mode == "event":
+            if cur_chain.mode == "event":
                 if next_v in dwell_stats and len(dwell_stats[next_v].samples) > 0:
                     samples = dwell_stats[next_v].samples
                     dwell = int(rng.choice(samples))

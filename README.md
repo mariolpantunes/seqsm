@@ -92,6 +92,30 @@ anomalies = model.score_anomalies(df, window_size=5, threshold_quantile=0.95)
 print(anomalies.filter(pl.col("is_anomaly")))
 ```
 
+### 4. Time as a Transition Signal, Signal Roles, Context Drivers
+
+```python
+from datetime import datetime
+from seqsm import SeqSM, TimeConfig, infer_roles
+
+print(infer_roles(df).table())           # which columns are state / context / time / episode / ignored
+
+model = SeqSM(
+    k=1, smoothing=0.1, auto_roles=True,  # roles inferred where not given
+    time_config=TimeConfig(slot_duration="15m", regimes="auto"),  # "day-part", "hour", "weekend", "phase", callable
+).fit(df)
+model.regime_report                       # candidates scored by blocked cross-validation (or BIC)
+
+model.predict_proba(history, at=datetime(2026, 3, 2, 8, 0))     # time-of-day kernel
+model.generate_schedule(96, start_time=datetime(2026, 3, 2))    # rollout advances the slot clock
+model.to_state_machine(regime=model.regime_of(datetime(2026, 3, 2, 8)))
+```
+
+`state_cols` define the atomic state, `context_cols` (e.g. `day_type`) condition the kernel without being states
+(`predict_proba(..., context={...})`), and `time_config` turns the timestamp into a regime signal.
+`discretize_columns` bins continuous columns first. Examples: `examples/time_slot_state_machine.py`,
+`examples/auto_signal_roles.py`, `examples/context_day_type.py`.
+
 ---
 
 ## Development & Quality Gate

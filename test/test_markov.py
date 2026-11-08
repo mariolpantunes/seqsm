@@ -421,6 +421,19 @@ class TestVariableOrderMarkovChain(unittest.TestCase):
         self.assertIn("fitted=True", repr(vom))
         self.assertIn("orders 1..2", str(vom))
 
+    def test_with_counts_shares_vocabulary_and_validates_shape(self) -> None:
+        chain = KOrderMarkovChain(k=1, smoothing=0.1).fit_from_arrays(np.array([0, 1, 0, 2, 0, 1], dtype=np.int32))
+        counts = np.zeros_like(chain.count_matrix)
+        counts[0, 2] = 4.0
+        sib = chain.with_counts(counts)
+        self.assertIs(sib.encoder, chain.encoder)
+        np.testing.assert_allclose(sib.transition_matrix.sum(axis=1), 1.0)
+        self.assertGreater(sib.transition_matrix[0, 2], chain.transition_matrix[0, 2])
+        with self.assertRaises(ValueError):
+            chain.with_counts(np.zeros((1, 1)))
+        with self.assertRaises(ValueError):
+            KOrderMarkovChain(k=1).with_counts(counts)
+
 
 if __name__ == "__main__":
     unittest.main()

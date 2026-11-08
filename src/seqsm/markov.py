@@ -24,6 +24,21 @@ from seqsm.linalg import (
 from seqsm.types import BackoffMethod, CSRMatrix, DwellDistribution, ModeType
 
 
+def dwell_distribution_from_samples(state_id: int, samples: Sequence[int]) -> DwellDistribution:
+    """Summarizes observed dwell durations of one state into a DwellDistribution."""
+    dwell_arr = np.asarray(samples, dtype=np.float64)
+    return DwellDistribution(
+        state_id=state_id,
+        count=len(samples),
+        mean=float(np.mean(dwell_arr)),
+        std=float(np.std(dwell_arr)),
+        median=float(np.median(dwell_arr)),
+        min_dwell=int(np.min(dwell_arr)),
+        max_dwell=int(np.max(dwell_arr)),
+        samples=tuple(int(x) for x in samples),
+    )
+
+
 class KOrderMarkovChain:
     """K-order Markov Chain over aligned discrete sequences with De Bruijn companion operator."""
 
@@ -194,19 +209,38 @@ class KOrderMarkovChain:
                     dwell_buckets.setdefault(int(s), []).append(int(d))
 
             for sid, dwells in dwell_buckets.items():
-                dwell_arr = np.array(dwells, dtype=np.float64)
-                self._dwell_stats[sid] = DwellDistribution(
-                    state_id=sid,
-                    count=len(dwells),
-                    mean=float(np.mean(dwell_arr)),
-                    std=float(np.std(dwell_arr)),
-                    median=float(np.median(dwell_arr)),
-                    min_dwell=int(np.min(dwell_arr)),
-                    max_dwell=int(np.max(dwell_arr)),
-                    samples=tuple(dwells),
-                )
+                self._dwell_stats[sid] = dwell_distribution_from_samples(sid, dwells)
 
         return self
+
+    def with_counts(
+        self,
+        counts: NDArray[np.float64],
+        dwell_stats: dict[int, DwellDistribution] | None = None,
+    ) -> KOrderMarkovChain:
+        """Returns a sibling chain sharing this window vocabulary but using other transition counts.
+
+        Used for regime-conditioned kernels: ``counts`` has shape (N_K, |S|) over the same K-windows.
+        """
+        if self._count_matrix is None:
+            raise ValueError("KOrderMarkovChain has not been fitted.")
+        arr = np.asarray(counts, dtype=np.float64)
+        if arr.shape != self._count_matrix.shape:
+            raise ValueError(f"counts shape {arr.shape} must match {self._count_matrix.shape}.")
+        sib = KOrderMarkovChain(
+            self._k,
+            mode=self._mode,
+            smoothing=self._smoothing,
+            sparse_threshold=self._sparse_threshold,
+            dtype=self._dtype,
+        )
+        sib._encoder = self._encoder
+        sib._n_states = self._n_states
+        sib._count_matrix = arr
+        sib._transition_matrix = compute_transition_probs_njit(arr, self._smoothing)
+        sib._build_companion_matrix()
+        sib._dwell_stats = dict(dwell_stats if dwell_stats is not None else self._dwell_stats)
+        return sib
 
     def _build_companion_matrix(self) -> None:
         """Constructs companion transition operator (dense array or CSRMatrix)."""
@@ -352,17 +386,7 @@ class KOrderMarkovChain:
 
             self._dwell_stats.clear()
             for sid, dwells in dwell_buckets.items():
-                dwell_arr = np.array(dwells, dtype=np.float64)
-                self._dwell_stats[sid] = DwellDistribution(
-                    state_id=sid,
-                    count=len(dwells),
-                    mean=float(np.mean(dwell_arr)),
-                    std=float(np.std(dwell_arr)),
-                    median=float(np.median(dwell_arr)),
-                    min_dwell=int(np.min(dwell_arr)),
-                    max_dwell=int(np.max(dwell_arr)),
-                    samples=tuple(dwells),
-                )
+                self._dwell_stats[sid] = dwell_distribution_from_samples(sid, dwells)
 
         return self
 
