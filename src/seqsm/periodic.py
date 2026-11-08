@@ -7,7 +7,7 @@ shared K-window vocabulary, with a pooled fallback for rows a regime has not att
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 import numpy as np
 import polars as pl
@@ -379,7 +379,7 @@ def cross_validated_nll(
 
 def select_regimes(
     states: NDArray[np.int32],
-    timestamps_us: NDArray[np.datetime64],
+    timestamps_us: NDArray[Any],
     candidates: Sequence[str | RegimeSpec],
     *,
     k: int = 1,

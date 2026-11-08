@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-from synthetic import daily_activity, random_chain, weekday_weekend
+from synthetic import daily_activity, random_chain, tick_routine, weekday_weekend
 
 from seqsm import SeqSM, TimeConfig, load_model, save_model
 from seqsm.timeutil import duration_us
@@ -300,6 +300,127 @@ class TestSerialization(unittest.TestCase):
     def test_homogeneous_model_has_no_phase_after_load(self) -> None:
         loaded = self._roundtrip(SeqSM(k=1).fit(daily_activity(n_days=2).select("activity")))
         self.assertIsNone(loaded.phase_chain)
+
+
+class TestDiscreteTimeColumn(unittest.TestCase):
+    """Time is already a discrete integer column (a tick/slot index); only a period is needed."""
+
+    def setUp(self) -> None:
+        self.df = tick_routine(n_days=12)
+        self.model = SeqSM(
+            k=1,
+            smoothing=0.01,
+            timestamp_col="slot",
+            state_cols=["activity"],
+            time_config=TimeConfig(regimes="phase", period=24),
+        ).fit(self.df)
+
+    def test_one_regime_per_phase_value(self) -> None:
+        self.assertEqual(self.model.n_regimes, 24)
+        self.assertEqual(self.model.state_encoder.feature_cols, ("activity",))
+        self.assertEqual(self.model.regime_of(24 * 5 + 7), 7)
+
+    def test_predict_uses_tick(self) -> None:
+        names = self.model.state_encoder.vocabulary["activity"].to_list()
+        # last sleep hour is 5; the target slot 6 is "home"
+        p = self.model.predict_proba([names.index("sleep")], at=24 * 40 + 6)
+        self.assertEqual(names[int(p.argmax())], "home")
+        p = self.model.predict_proba([names.index("sleep")], at=24 * 40 + 3)
+        self.assertEqual(names[int(p.argmax())], "sleep")
+        multi = self.model.predict_proba([names.index("sleep")], steps=3, at=5)
+        self.assertEqual([names[int(i)] for i in multi.argmax(axis=1)], ["sleep", "home", "home"])
+
+    def test_schedule_ticks(self) -> None:
+        sched = self.model.generate_schedule(48, start_time=0, seed=1)
+        by_slot = dict(zip(sched["timestamp"].to_list(), sched["activity"].to_list(), strict=True))
+        self.assertEqual(by_slot[3], "sleep")
+        self.assertEqual(by_slot[12], "work")
+        self.assertEqual(by_slot[24 + 20], "home")
+        with self.assertRaises(TypeError):
+            self.model.generate_schedule(10, start_time=datetime(2026, 1, 1))
+        with self.assertRaises(TypeError):
+            self.model.generate_schedule(timedelta(hours=1))
+
+    def test_type_errors(self) -> None:
+        with self.assertRaises(TypeError):
+            self.model.regime_of(datetime(2026, 1, 1))
+        with self.assertRaises(ValueError):
+            SeqSM(timestamp_col="slot", time_config=TimeConfig(slot_duration="1h", regimes="phase", period=24)).fit(
+                self.df
+            )
+        with self.assertRaises(ValueError):
+            SeqSM(timestamp_col="slot", time_config=TimeConfig(regimes="day-part")).fit(self.df)
+        with self.assertRaises(ValueError):
+            SeqSM(timestamp_col="slot", time_config=TimeConfig(regimes="phase")).fit(self.df)
+        with self.assertRaises(ValueError):
+            TimeConfig(regimes="phase", period=1)
+        plain = SeqSM(timestamp_col="timestamp", time_config=TimeConfig(regimes="day-part")).fit(daily_activity(3))
+        with self.assertRaises(TypeError):
+            plain.regime_of(5)
+        with self.assertRaises(TypeError):
+            plain.generate_schedule(4, start_time=3)
+
+    def test_coarser_bins_and_callable(self) -> None:
+        m = SeqSM(timestamp_col="slot", time_config=TimeConfig(regimes="phase", period=24, n_regimes=4)).fit(self.df)
+        self.assertEqual(m.n_regimes, 4)
+        self.assertEqual(m.regime_of(13), 2)
+        c = SeqSM(
+            timestamp_col="slot",
+            time_config=TimeConfig(regimes=lambda t: (t % 24 >= 12).astype(np.int32), n_regimes=2),
+        ).fit(self.df)
+        self.assertEqual(c.regime_of(13), 1)
+
+    def test_auto_period_and_auto_bins(self) -> None:
+        noisy = tick_routine(n_days=30, noise=0.1, seed=2)
+        m = SeqSM(
+            smoothing=0.1,
+            timestamp_col="slot",
+            state_cols=["activity"],
+            time_config=TimeConfig(regimes="phase", period="auto", n_regimes=6),
+        ).fit(noisy)
+        self.assertEqual(m._regime_meta["period"], 24)
+        a = SeqSM(
+            smoothing=0.1,
+            timestamp_col="slot",
+            state_cols=["activity"],
+            time_config=TimeConfig(regimes="auto", period=24),
+        ).fit(noisy)
+        assert a.regime_report is not None
+        self.assertGreater(a.n_regimes, 1)
+        self.assertIn("none", a.regime_report["regime"].to_list())
+        flat = pl.DataFrame({"slot": list(range(200)), "x": ["a", "b", "c", "a", "c"] * 40})
+        with self.assertRaises(ValueError):
+            SeqSM(timestamp_col="slot", time_config=TimeConfig(regimes="phase", period="auto")).fit(
+                pl.DataFrame({"slot": list(range(8)), "x": list("aaaaaaaa")})
+            )
+        self.assertIsNotNone(SeqSM(timestamp_col="slot", time_config=TimeConfig(regimes="auto", period=5)).fit(flat))
+
+    def test_auto_roles_finds_tick_column(self) -> None:
+        m = SeqSM(auto_roles=True, time_config=TimeConfig(regimes="phase", period=24)).fit(self.df)
+        self.assertEqual(m.signal_roles.time if m.signal_roles else None, "slot")
+        self.assertEqual(m.state_encoder.feature_cols, ("activity",))
+        self.assertEqual(m.n_regimes, 24)
+
+    def test_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "m.npz"
+            save_model(self.model, path)
+            loaded = load_model(path)
+        np.testing.assert_allclose(self.model.predict_proba([0], at=30), loaded.predict_proba([0], at=30))
+        a = self.model.generate_schedule(30, start_time=2, seed=4)
+        b = loaded.generate_schedule(30, start_time=2, seed=4)
+        self.assertEqual(a["state_id"].to_list(), b["state_id"].to_list())
+        self.assertEqual(loaded.time_config.period if loaded.time_config else None, 24)
+
+    def test_event_mode(self) -> None:
+        m = SeqSM(
+            mode="event",
+            timestamp_col="slot",
+            state_cols=["activity"],
+            time_config=TimeConfig(regimes="phase", period=24),
+        ).fit(self.df)
+        sched = m.generate_schedule(24, start_time=0, seed=1)
+        self.assertEqual(int(sched["dwell_duration"].sum()), 24)
 
 
 if __name__ == "__main__":

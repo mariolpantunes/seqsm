@@ -98,6 +98,19 @@ class TestMotifs(unittest.TestCase):
         )
         self.assertEqual(len(res_weighted), len(seq))
 
+    def test_fundamental_period_prefers_cycle_over_multiples(self) -> None:
+        from seqsm.motifs import fundamental_period
+
+        rng = np.random.default_rng(0)
+        base = np.repeat(np.arange(4), 6).astype(np.int32)  # cycle of 24 with sticky blocks
+        seq = np.tile(base, 30)
+        flip = rng.random(len(seq)) < 0.1
+        seq = np.where(flip, rng.integers(0, 4, len(seq)), seq).astype(np.int32)
+        self.assertEqual(fundamental_period(seq), 24)
+        self.assertEqual(fundamental_period(np.zeros(50, np.int32)), 1)
+        self.assertEqual(fundamental_period(np.array([0, 1], np.int32)), 1)
+        self.assertEqual(fundamental_period(rng.integers(0, 3, 400).astype(np.int32)), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

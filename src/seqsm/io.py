@@ -15,7 +15,7 @@ from seqsm.encoding import StateEncoder
 from seqsm.estimator import SeqSM
 from seqsm.markov import KOrderMarkovChain
 from seqsm.periodic import PhaseConditionedMarkovChain
-from seqsm.timeslots import TimeConfig, phase_regimes, preset_regimes
+from seqsm.timeslots import TimeConfig, phase_regimes, preset_regimes, tick_phase_regimes
 from seqsm.timeutil import duration_us
 from seqsm.types import CSRMatrix, DwellDistribution
 
@@ -141,6 +141,7 @@ def save_model(model: SeqSM, filepath: str | Path) -> None:
             "timestamp_col": model._eff_timestamp_col,
             "episode_col": model._eff_episode_col,
             "has_time_config": tc is not None,
+            "discrete": model._discrete,
             "slot_duration_us": duration_us(tc.slot_duration) if tc is not None and tc.slot_duration else None,
             "fill": tc.fill if tc is not None else "ffill",
             "dwell_samples": {
@@ -157,12 +158,15 @@ def save_model(model: SeqSM, filepath: str | Path) -> None:
 def _restore_phase(model: SeqSM, chain: KOrderMarkovChain, meta: dict[str, Any], counts: Any) -> None:
     """Rebuilds the regime-conditioned chain, regime function and context vocabulary of a saved model."""
     rmeta = meta["regime_meta"]
-    if rmeta["kind"] == "phase":
+    if rmeta["kind"] == "phase_ticks":
+        spec = tick_phase_regimes(int(rmeta["period"]), int(rmeta["n_regimes"]))
+    elif rmeta["kind"] == "phase":
         spec = phase_regimes(timedelta(microseconds=int(rmeta["period_us"])), int(rmeta["n_regimes"]))
     else:
         spec = preset_regimes(str(rmeta["name"]))
     model._regime_spec = spec
     model._regime_meta = dict(rmeta)
+    model._discrete = bool(meta.get("discrete", False))
     model._n_time_regimes = int(meta["n_time_regimes"])
     model._step = timedelta(microseconds=int(meta["step_us"])) if meta["step_us"] is not None else None
     model._eff_context_cols = tuple(meta["context_cols"])
@@ -171,13 +175,20 @@ def _restore_phase(model: SeqSM, chain: KOrderMarkovChain, meta: dict[str, Any],
     model._eff_timestamp_col = meta["timestamp_col"]
     model._eff_episode_col = meta["episode_col"]
     if meta["has_time_config"]:
-        regimes = "phase" if rmeta["kind"] == "phase" else str(rmeta["name"])
+        is_phase = rmeta["kind"] in ("phase", "phase_ticks")
+        regimes = "phase" if is_phase else str(rmeta["name"])
         slot_us = meta["slot_duration_us"]
         model.time_config = TimeConfig(
             slot_duration=timedelta(microseconds=int(slot_us)) if slot_us is not None else None,
             regimes=regimes,
-            period=timedelta(microseconds=int(rmeta["period_us"])) if rmeta["kind"] == "phase" else None,
-            n_regimes=int(rmeta["n_regimes"]) if rmeta["kind"] == "phase" else None,
+            period=(
+                int(rmeta["period"])
+                if rmeta["kind"] == "phase_ticks"
+                else timedelta(microseconds=int(rmeta["period_us"]))
+                if rmeta["kind"] == "phase"
+                else None
+            ),
+            n_regimes=int(rmeta["n_regimes"]) if is_phase else None,
             fill=meta["fill"],
             min_regime_count=int(meta["min_regime_count"]),
         )

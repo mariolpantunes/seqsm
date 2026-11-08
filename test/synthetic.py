@@ -47,3 +47,19 @@ def random_chain(n: int = 4000, seed: int = 1, slot_min: int = 15) -> pl.DataFra
         out.append("abc"[s])
     ts = [datetime(2026, 1, 5) + timedelta(minutes=slot_min * i) for i in range(n)]
     return pl.DataFrame({"timestamp": ts, "x": out})
+
+
+def tick_routine(n_days: int = 16, period: int = 24, seed: int = 0, noise: float = 0.0) -> pl.DataFrame:
+    """Discrete time column `slot` (hour index 0..period-1 repeating per day, episode per day).
+
+    sleep slots 0-5, work 8-16, home otherwise; `noise` flips a state at random.
+    """
+    rng = np.random.default_rng(seed)
+    rows: list[dict[str, object]] = []
+    for d in range(n_days):
+        for h in range(period):
+            act = "sleep" if h < 6 else "work" if 8 <= h < 17 else "home"
+            if rng.random() < noise:
+                act = str(rng.choice(["sleep", "work", "home"]))
+            rows.append({"day": d, "slot": d * period + h, "activity": act})
+    return pl.DataFrame(rows)

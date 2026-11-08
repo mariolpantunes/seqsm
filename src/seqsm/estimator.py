@@ -13,17 +13,19 @@ from numpy.typing import DTypeLike, NDArray
 from seqsm.encoding import StateEncoder
 from seqsm.machine import StateMachine
 from seqsm.markov import KOrderMarkovChain
-from seqsm.motifs import detect_period, score_anomalies
+from seqsm.motifs import detect_period, fundamental_period, score_anomalies
 from seqsm.periodic import PhaseConditionedMarkovChain, select_regimes
 from seqsm.roles import SignalRoles, infer_roles
 from seqsm.schedule import ScheduleGenerator
 from seqsm.timeslots import (
     RegimeSpec,
     TimeConfig,
-    datetime_us,
+    discrete_candidates,
     preset_regimes,
     resample_to_slots,
     resolve_regimes,
+    tick_phase_regimes,
+    time_array,
     to_datetime64,
 )
 from seqsm.timeutil import duration_us, parse_duration
@@ -97,6 +99,7 @@ class SeqSM:
         self._n_time_regimes: int = 1
         self._context_ids: dict[tuple[Any, ...], int] = {}
         self._step: timedelta | None = None
+        self._discrete: bool = False
         self._regime_meta: dict[str, Any] = {}
 
     @property
@@ -211,16 +214,21 @@ class SeqSM:
         tc = self.time_config
         ts_col = self._eff_timestamp_col
         self._step = None
+        self._discrete = False
         if tc is not None:
             if ts_col is None or ts_col not in frame.columns:
                 raise ValueError("time_config requires a timestamp column (timestamp_col or auto_roles).")
-            if tc.slot_duration is not None:
+            self._discrete = bool(frame[ts_col].dtype.is_integer())
+            if self._discrete:
+                if tc.slot_duration is not None:
+                    raise ValueError("slot_duration does not apply to an integer time column (it is already discrete).")
+            elif tc.slot_duration is not None:
                 keep = list(dict.fromkeys([*cols_to_use, *ctx_cols]))
                 frame, ep_ids_slot = resample_to_slots(frame, ts_col, tc.slot_duration, keep, ep_ids, tc.fill)
                 ep_ids = ep_ids_slot if ep_ids is not None or len(np.unique(ep_ids_slot)) > 1 else None
                 self._step = parse_duration(tc.slot_duration)
             else:
-                ts_us = datetime_us(frame[ts_col]).astype(np.int64)
+                ts_us = time_array(frame[ts_col])[0].astype(np.int64)
                 if len(ts_us) > 1:
                     self._step = timedelta(microseconds=int(np.median(np.diff(ts_us))))
 
@@ -269,9 +277,36 @@ class SeqSM:
         if tc is not None:
             ts_col = self._eff_timestamp_col
             assert ts_col is not None
-            ts_us = datetime_us(frame[ts_col])
-            period: str | timedelta | None = None
-            if tc.regimes == "auto":
+            ts_us, discrete = time_array(frame[ts_col])
+            period: str | timedelta | int | None = None
+            if discrete:
+                if isinstance(tc.regimes, str) and tc.regimes not in ("phase", "auto"):
+                    raise ValueError(
+                        f"regimes={tc.regimes!r} needs a datetime column; for an integer time column use "
+                        "regimes='phase' (or 'auto') with an integer period, or a callable."
+                    )
+                if tc.regimes in ("phase", "auto"):
+                    period = self._tick_period(tc.period, states)
+                if tc.regimes == "auto":
+                    assert isinstance(period, int)
+                    spec, self.regime_report = select_regimes(
+                        states,
+                        ts_us,
+                        discrete_candidates(period),
+                        k=self.k,
+                        mode=self.mode,
+                        episode_ids=ep_ids,
+                        criterion=tc.criterion,
+                        folds=tc.cv_folds,
+                        smoothing=max(self.smoothing, 0.1),
+                        min_regime_count=tc.min_regime_count,
+                    )
+                elif tc.regimes == "phase":
+                    assert isinstance(period, int)
+                    spec = tick_phase_regimes(period, tc.n_regimes)
+                else:
+                    spec = resolve_regimes(tc)
+            elif tc.regimes == "auto":
                 spec, self.regime_report = select_regimes(
                     states,
                     ts_us,
@@ -287,7 +322,7 @@ class SeqSM:
             elif tc.regimes == "phase":
                 period = tc.period
                 if period is None or period == "auto":
-                    lag = detect_period(states)
+                    lag = fundamental_period(states)
                     if lag <= 1 or self._step is None:
                         raise ValueError(
                             "period='auto' found no cycle longer than one slot (needs a slot grid); pass an explicit period."
@@ -301,8 +336,13 @@ class SeqSM:
             time_reg = spec(ts_us)
             if callable(tc.regimes):
                 self._regime_meta = {"kind": "callable"}
+            elif discrete and spec.n_regimes == 1:
+                self._regime_meta = {"kind": "preset", "name": "none"}
+            elif discrete:
+                assert isinstance(period, int)
+                self._regime_meta = {"kind": "phase_ticks", "period": period, "n_regimes": spec.n_regimes}
             elif tc.regimes == "phase":
-                assert period is not None
+                assert period is not None and not isinstance(period, int)
                 self._regime_meta = {"kind": "phase", "period_us": duration_us(period), "n_regimes": spec.n_regimes}
             else:
                 self._regime_meta = {"kind": "preset", "name": spec.name}
@@ -317,6 +357,27 @@ class SeqSM:
             joined = frame.select(list(ctx_cols)).join(vocab, on=list(ctx_cols), how="left")
             ctx_ids = joined["__ctx__"].to_numpy().astype(np.int32)
         return (ctx_ids * self._n_time_regimes + time_reg).astype(np.int32)
+
+    def _tick_period(self, period: str | timedelta | int | None, states: NDArray[np.int32]) -> int:
+        """Resolves the period (in ticks) of an integer time column; 'auto' uses CMA on the state sequence."""
+        if isinstance(period, int):
+            return period
+        if period == "auto":
+            lag = fundamental_period(states)
+            if lag <= 1:
+                raise ValueError("period='auto' found no cycle longer than one tick; pass an explicit integer period.")
+            return int(lag)
+        raise ValueError("An integer time column needs period=<int ticks> or period='auto'.")
+
+    def _time_value(self, at: datetime | int) -> NDArray[Any]:
+        """One-element time array in the units the regime function expects."""
+        if self._discrete:
+            if isinstance(at, datetime):
+                raise TypeError("This model uses an integer time column; pass `at` as an int tick.")
+            return np.array([int(at)], dtype=np.int64)
+        if not isinstance(at, datetime):
+            raise TypeError("This model uses a datetime column; pass `at` as a datetime.")
+        return np.array([to_datetime64(at)])
 
     def _context_id(self, context: Mapping[str, Any] | None) -> int:
         """Maps a context dict to its fitted context id (0 when the model has no context columns)."""
@@ -335,7 +396,7 @@ class SeqSM:
             raise ValueError(f"Unseen context {dict(zip(self._eff_context_cols, key, strict=True))}.")
         return cid
 
-    def regime_of(self, at: datetime | None = None, context: Mapping[str, Any] | None = None) -> int:
+    def regime_of(self, at: datetime | int | None = None, context: Mapping[str, Any] | None = None) -> int:
         """Returns the kernel regime id for a timestamp and/or context (0 for a homogeneous model)."""
         if self._phase is None or self._regime_spec is None:
             raise ValueError("Model has no time_config or context_cols; there are no regimes.")
@@ -345,20 +406,29 @@ class SeqSM:
         elif at is None:
             raise ValueError("at (a datetime) is required: the model's regimes depend on time.")
         else:
-            tr = int(spec(np.array([to_datetime64(at)]))[0])
+            tr = int(spec(self._time_value(at))[0])
         return self._context_id(context) * self._n_time_regimes + tr
 
-    def _regime_sequence(self, at: datetime | None, context: Mapping[str, Any] | None, steps: int) -> list[int] | None:
+    def _regime_sequence(
+        self, at: datetime | int | None, context: Mapping[str, Any] | None, steps: int
+    ) -> list[int] | None:
         """Regimes of the next ``steps`` predicted slots, or None to use the pooled kernel."""
         if at is None and context is None:
             return None
         if self._phase is None:
             raise ValueError("at/context given, but the model was fitted without time_config or context_cols.")
-        if steps > 1 and at is not None and self._step is None:
+        if steps > 1 and at is not None and self._step is None and not self._discrete:
             raise ValueError("Multi-step regime prediction needs a known step; fit with a slot_duration.")
         out: list[int] = []
         for h in range(steps):
-            t = at + h * self._step if at is not None and self._step is not None else at
+            if at is None:
+                t = None
+            elif self._discrete:
+                t = int(at) + h  # type: ignore[arg-type]
+            elif self._step is not None:
+                t = at + h * self._step  # type: ignore[operator]
+            else:
+                t = at
             out.append(self.regime_of(t, context))
         return out
 
@@ -393,7 +463,7 @@ class SeqSM:
         steps: int = 1,
         *,
         return_diagnostics: Literal[True],
-        at: datetime | None = None,
+        at: datetime | int | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> tuple[NDArray[np.float64], dict[str, Any]]: ...
 
@@ -404,7 +474,7 @@ class SeqSM:
         steps: int,
         return_diagnostics: Literal[True],
         *,
-        at: datetime | None = None,
+        at: datetime | int | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> tuple[NDArray[np.float64], dict[str, Any]]: ...
 
@@ -415,7 +485,7 @@ class SeqSM:
         steps: int = 1,
         return_diagnostics: Literal[False] = False,
         *,
-        at: datetime | None = None,
+        at: datetime | int | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> NDArray[np.float64]: ...
 
@@ -425,7 +495,7 @@ class SeqSM:
         steps: int = 1,
         return_diagnostics: bool = False,
         *,
-        at: datetime | None = None,
+        at: datetime | int | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> NDArray[np.float64] | tuple[NDArray[np.float64], dict[str, Any]]:
         """Returns next-state probability distribution vector of shape (|S|,) or (steps, |S|).
@@ -496,7 +566,7 @@ class SeqSM:
         steps: int = 1,
         method: PredictionMethod = "sample",
         *,
-        at: datetime | None = None,
+        at: datetime | int | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> pl.DataFrame:
         """Predicts the next step(s) as a decoded Polars DataFrame (``at``/``context``: see predict_proba)."""
@@ -541,7 +611,7 @@ class SeqSM:
         init_history: pl.DataFrame | Sequence[int] | None = None,
         method: ScheduleMethod = "sample",
         time_unit: timedelta | str | None = None,
-        start_time: datetime | None = None,
+        start_time: datetime | int | None = None,
         constraints: ScheduleConstraints | None = None,
         n_schedules: int = 1,
         seed: int | None = None,
@@ -551,7 +621,8 @@ class SeqSM:
         Generates realistic synthetic schedules over the specified time window following arc transition probabilities.
 
         With a time/context model every transition uses the kernel of the regime of its slot
-        (``start_time`` + step * ``time_unit``; ``time_unit`` defaults to the fitted slot duration, else 1m);
+        (``start_time`` + step * ``time_unit``; ``time_unit`` defaults to the fitted slot duration, else 1m).
+        With an integer time column ``window`` counts ticks and ``start_time`` is an int tick;
         ``context`` fixes the context column values for the whole rollout.
 
         Returns:
@@ -562,21 +633,29 @@ class SeqSM:
         if self._chain is None or self._encoder is None:
             raise ValueError("SeqSM has not been fitted.")
 
-        # Resolve time_unit delta
-        step_delta = parse_duration(time_unit) if time_unit is not None else (self._step or parse_duration("1m"))
-
-        # Resolve total step count
-        base_time = start_time if start_time is not None else datetime(2026, 1, 1, 0, 0, 0)
-        if isinstance(window, int):
+        base_time: datetime | int
+        if self._discrete:
+            # Integer time column: `window` counts ticks and `start_time` is an int tick (default 0).
+            if not isinstance(window, int) or isinstance(start_time, datetime):
+                raise TypeError("Models with an integer time column need an int window and an int start_time.")
+            step_delta = timedelta(0)
+            base_time = int(start_time) if start_time is not None else 0
             n_steps = window
-        elif isinstance(window, timedelta):
-            n_steps = max(1, int(window.total_seconds() / step_delta.total_seconds()))
-        elif isinstance(window, tuple):
-            base_time = window[0]
-            diff = window[1] - window[0]
-            n_steps = max(1, int(diff.total_seconds() / step_delta.total_seconds()))
         else:
-            n_steps = 60
+            step_delta = parse_duration(time_unit) if time_unit is not None else (self._step or parse_duration("1m"))
+            if isinstance(start_time, int):
+                raise TypeError("start_time must be a datetime for a datetime-based model.")
+            base_time = start_time if start_time is not None else datetime(2026, 1, 1, 0, 0, 0)
+            if isinstance(window, int):
+                n_steps = window
+            elif isinstance(window, timedelta):
+                n_steps = max(1, int(window.total_seconds() / step_delta.total_seconds()))
+            elif isinstance(window, tuple):
+                base_time = window[0]
+                diff = window[1] - window[0]
+                n_steps = max(1, int(diff.total_seconds() / step_delta.total_seconds()))
+            else:
+                n_steps = 60
 
         # Encode init_history if provided
         init_arr: NDArray[np.int32] | None = None
@@ -601,7 +680,7 @@ class SeqSM:
 
         all_schedule_ids: list[int] = []
         all_time_steps: list[int] = []
-        all_timestamps: list[datetime] = []
+        all_timestamps: list[Any] = []
         all_state_ids: list[int] = []
         all_dwells: list[int] = []
         all_probs: list[float] = []
@@ -612,10 +691,14 @@ class SeqSM:
         ss = np.random.SeedSequence(base_seed)
         child_seeds = [int(s.generate_state(1)[0]) for s in ss.spawn(n_schedules)]
 
+        has_initial = constraints is not None and constraints.initial_state is not None
         for sched_id in range(n_schedules):
+            start_hist = init_arr
+            if start_hist is None and regime_at is not None and not has_initial and self._phase is not None:
+                start_hist = self._phase_start_history(regime_at, np.random.default_rng(child_seeds[sched_id]))
             traj = gen.generate(
                 n_steps=n_steps,
-                init_history=init_arr,
+                init_history=start_hist,
                 method=method,
                 constraints=constraints,
                 seed=child_seeds[sched_id],
@@ -631,7 +714,9 @@ class SeqSM:
 
                 all_schedule_ids.append(sched_id)
                 all_time_steps.append(curr_t)
-                all_timestamps.append(base_time + curr_t * step_delta)
+                all_timestamps.append(
+                    base_time + curr_t if isinstance(base_time, int) else base_time + curr_t * step_delta
+                )
                 all_state_ids.append(sid)
                 all_dwells.append(dwell)
                 all_probs.append(prob)
@@ -659,8 +744,17 @@ class SeqSM:
         # Combine schedule metadata with feature columns
         return pl.concat([base_df, decoded_features], how="horizontal")
 
+    def _phase_start_history(self, regime_at: Callable[[int], int], rng: np.random.Generator) -> NDArray[np.int32]:
+        """Draws a start history from the state distribution of the regime just before the rollout begins."""
+        assert self._phase is not None
+        counts = self._phase.regime_counts[regime_at(-1)].sum(axis=0)
+        if counts.sum() <= 0:
+            counts = self._phase.pooled.count_matrix.sum(axis=0)
+        v = int(rng.choice(len(counts), p=counts / counts.sum()))
+        return np.full(self.k, v, dtype=np.int32)
+
     def _make_regime_at(
-        self, base_time: datetime, step_delta: timedelta, context: Mapping[str, Any] | None
+        self, base_time: datetime | int, step_delta: timedelta, context: Mapping[str, Any] | None
     ) -> Callable[[int], int] | None:
         """Builds the slot-index -> regime map for schedule rollouts (None for a homogeneous model)."""
         if self._phase is None or self._regime_spec is None:
@@ -672,6 +766,9 @@ class SeqSM:
         n_time = self._n_time_regimes
         if spec.n_regimes == 1:
             return lambda _step: ctx_id * n_time
+        if isinstance(base_time, int):
+            base_tick = base_time
+            return lambda step: ctx_id * n_time + int(spec(np.array([base_tick + step], dtype=np.int64))[0])
         base_np = to_datetime64(base_time)
         step_us = round(step_delta.total_seconds() * 1_000_000)
 

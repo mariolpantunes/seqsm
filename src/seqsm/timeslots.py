@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Literal
+from typing import Any, Literal
 
 import numpy as np
 import polars as pl
@@ -17,7 +17,7 @@ from numpy.typing import NDArray
 
 from seqsm.timeutil import duration_us, parse_duration
 
-RegimeFn = Callable[[NDArray[np.datetime64]], NDArray[np.int32]]
+RegimeFn = Callable[[NDArray[Any]], NDArray[np.int32]]
 
 _US_PER_HOUR = 3_600_000_000
 _US_PER_DAY = 86_400_000_000
@@ -45,8 +45,9 @@ class TimeConfig:
             None keeps the rows as they are.
         regimes: A preset name (see ``PRESETS``), ``"auto"`` (BIC selection among ``candidates``),
             or a callable mapping ``datetime64[us]`` arrays to integer regime ids in [0, n_regimes).
-        period: Cycle length for ``regimes="phase"`` (e.g. '1d'), or ``"auto"`` to detect it with
-            categorical match autocorrelation on the slot sequence.
+        period: Cycle length for ``regimes="phase"`` (e.g. '1d' for a datetime column, or an int number of
+            ticks for an integer time column), or ``"auto"`` to detect it with categorical match
+            autocorrelation on the slot sequence.
         n_regimes: Number of equal-width phase bins (``phase``) or the id count of a callable.
         fill: ``"ffill"`` repeats the previous slot value into empty slots; ``"skip"`` leaves them out
             (the chain then sees consecutive observed slots).
@@ -60,7 +61,7 @@ class TimeConfig:
 
     slot_duration: str | timedelta | None = None
     regimes: str | RegimeFn = "day-part"
-    period: str | timedelta | None = None
+    period: str | timedelta | int | None = None
     n_regimes: int | None = None
     fill: Literal["ffill", "skip"] = "ffill"
     candidates: tuple[str, ...] = DEFAULT_CANDIDATES
@@ -79,6 +80,8 @@ class TimeConfig:
             raise ValueError(f"fill must be 'ffill' or 'skip', got {self.fill!r}.")
         if self.slot_duration is not None:
             duration_us(self.slot_duration)
+        if isinstance(self.period, int) and (isinstance(self.period, bool) or self.period < 2):
+            raise ValueError(f"An integer period must be >= 2 ticks, got {self.period!r}.")
         if isinstance(self.regimes, str) and self.regimes != "auto" and self.regimes not in PRESETS:
             raise ValueError(f"Unknown regimes preset {self.regimes!r}; expected one of {PRESETS} or 'auto'.")
         if callable(self.regimes) and (self.n_regimes is None or self.n_regimes < 1):
@@ -98,7 +101,7 @@ class RegimeSpec:
     n_regimes: int
     fn: RegimeFn
 
-    def __call__(self, ts_us: NDArray[np.datetime64]) -> NDArray[np.int32]:
+    def __call__(self, ts_us: NDArray[Any]) -> NDArray[np.int32]:
         out = np.asarray(self.fn(ts_us), dtype=np.int32)
         if out.size and (out.min() < 0 or out.max() >= self.n_regimes):
             raise ValueError(f"Regime function {self.name!r} returned ids outside [0, {self.n_regimes - 1}].")
@@ -135,6 +138,36 @@ def phase_regimes(period: str | timedelta, n_regimes: int) -> RegimeSpec:
     return RegimeSpec(f"phase({parse_duration(period)}/{n_regimes})", n_regimes, fn)
 
 
+def tick_phase_regimes(period: int, n_regimes: int | None = None) -> RegimeSpec:
+    """Equal-width bins of ``tick mod period`` for an integer (already discrete) time column.
+
+    ``n_regimes`` defaults to ``period`` (one regime per phase value, e.g. 96 quarter-hour slots of a day).
+    """
+    if period < 2:
+        raise ValueError(f"period must be >= 2 ticks, got {period}.")
+    n = period if n_regimes is None else n_regimes
+    if not 1 <= n <= period:
+        raise ValueError(f"n_regimes must lie in [1, {period}], got {n}.")
+
+    def fn(ticks: NDArray[np.int64]) -> NDArray[np.int32]:
+        return (((np.asarray(ticks, dtype=np.int64) % period) * n) // period).astype(np.int32)
+
+    return RegimeSpec(f"ticks({period}/{n})", n, fn)
+
+
+def discrete_candidates(period: int) -> list[RegimeSpec]:
+    """Phase-bin candidates (2, 3, 4, 6, 8, 12, 24 bins and one per tick) for ``regimes='auto'`` on tick columns."""
+    sizes = sorted({n for n in (2, 3, 4, 6, 8, 12, 24) if n < period} | {period})
+    return [tick_phase_regimes(period, n) for n in sizes]
+
+
+def time_array(series: pl.Series) -> tuple[NDArray[Any], bool]:
+    """Returns (time values, is_discrete). Integer columns are discrete ticks; others become ``datetime64[us]``."""
+    if series.dtype.is_integer():
+        return series.to_numpy().astype(np.int64), True
+    return datetime_us(series), False
+
+
 def preset_regimes(name: str) -> RegimeSpec:
     """Returns one of the calendar presets (everything but 'phase' and 'auto')."""
     if name == "none":
@@ -156,7 +189,7 @@ def preset_regimes(name: str) -> RegimeSpec:
     raise ValueError(f"Unknown regimes preset {name!r}.")
 
 
-def resolve_regimes(config: TimeConfig, period: str | timedelta | None = None) -> RegimeSpec:
+def resolve_regimes(config: TimeConfig, period: str | timedelta | int | None = None) -> RegimeSpec:
     """Turns a TimeConfig into a RegimeSpec ('auto' must be resolved by the caller first)."""
     reg = config.regimes
     if callable(reg):
@@ -168,6 +201,8 @@ def resolve_regimes(config: TimeConfig, period: str | timedelta | None = None) -
         per = period if period is not None else config.period
         if per is None or per == "auto":
             raise ValueError("regimes='phase' needs an explicit period (or period='auto' resolved by the estimator).")
+        if isinstance(per, int):
+            return tick_phase_regimes(per, config.n_regimes)
         n = config.n_regimes if config.n_regimes is not None else 4
         return phase_regimes(per, n)
     return preset_regimes(reg)
@@ -242,9 +277,12 @@ __all__ = [
     "RegimeSpec",
     "TimeConfig",
     "datetime_us",
+    "discrete_candidates",
     "phase_regimes",
     "preset_regimes",
     "resample_to_slots",
     "resolve_regimes",
+    "tick_phase_regimes",
+    "time_array",
     "to_datetime64",
 ]

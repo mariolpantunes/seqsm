@@ -33,7 +33,7 @@ _CONTEXT_NAME = re.compile(
     re.IGNORECASE,
 )
 _EPISODE_NAME = re.compile(r"(^|_)(episode|session|run|trip|sequence|seq|day_idx|day)(_?id|_?idx)?($|_)", re.IGNORECASE)
-_TIME_NAME = re.compile(r"(^|_)(time|timestamp|ts|datetime|date)($|_)", re.IGNORECASE)
+_TIME_NAME = re.compile(r"(^|_)(time|timestamp|ts|datetime|date|slot|tick|step)($|_)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -197,7 +197,7 @@ def infer_roles(
         if time_col is None:
             for c in df.columns:
                 s = df[c]
-                if s.dtype.is_numeric() and _TIME_NAME.search(c) and s.n_unique() == n and s.is_sorted():
+                if s.dtype.is_numeric() and _TIME_NAME.search(c) and (s.n_unique() < n or s.is_sorted()):
                     time_col = c
                     break
     if time_col is not None and time_col in df.columns:

@@ -53,6 +53,42 @@ def detect_period(
     return int(best_tau)
 
 
+def fundamental_period(
+    states: NDArray[np.int32],
+    max_lag: int | None = None,
+    tolerance: float = 0.9,
+    min_rho: float = 0.05,
+) -> int:
+    """Returns the smallest lag that is a local maximum of the categorical match autocorrelation.
+
+    ``detect_period`` returns the global CMA maximum, which on noisy data is often a multiple of the cycle
+    (48 or 120 for a 24-slot day). Here the smallest local maximum with rho >= ``tolerance`` * rho_max wins;
+    persistent states cannot fake a cycle because their rho decreases monotonically at short lags.
+    Returns 1 when no lag reaches ``min_rho``.
+    """
+    arr = np.asarray(states, dtype=np.int32)
+    n = len(arr)
+    max_tau = min(n // 2, 500) if max_lag is None else min(max_lag, n - 1)
+    valid = arr[arr >= 0]
+    if n < 4 or max_tau < 3 or len(valid) == 0:
+        return 1
+    probs = np.bincount(valid).astype(np.float64) / len(valid)
+    p0 = float(np.sum(probs**2))
+    denom = max(1.0 - p0, 1e-12)
+    rho = np.zeros(max_tau + 2, dtype=np.float64)
+    for tau in range(1, max_tau + 2):
+        if tau >= n:
+            break
+        rho[tau] = (float(np.mean(arr[:-tau] == arr[tau:])) - p0) / denom
+    best = float(rho[2 : max_tau + 1].max()) if max_tau >= 2 else 0.0
+    if best < max(min_rho, 4.0 / float(np.sqrt(max(n - max_tau, 1)))):  # above ~4 sigma of chance matches
+        return 1
+    for tau in range(2, max_tau + 1):
+        if rho[tau] >= tolerance * best and rho[tau] >= rho[tau - 1] and rho[tau] >= rho[tau + 1]:
+            return tau
+    return 1
+
+
 def score_anomalies(
     chain: KOrderMarkovChain | VariableOrderMarkovChain,
     encoded_states: NDArray[np.int32],
@@ -206,4 +242,4 @@ def compare_chains(
     )
 
 
-__all__ = ["compare_chains", "detect_period", "score_anomalies"]
+__all__ = ["compare_chains", "detect_period", "fundamental_period", "score_anomalies"]
