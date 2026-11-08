@@ -117,7 +117,7 @@ model.to_state_machine(regime=model.regime_of(datetime(2026, 3, 2, 8)))
 If time is already a discrete integer column (a tick/slot index), pass it as `timestamp_col` and give only a period:
 `TimeConfig(regimes="phase", period=96, n_regimes=12)`, or `TimeConfig(regimes="auto", period="auto")` to detect the cycle and
 pick the bin count; `at=` and `start_time=` are then int ticks. `examples/discrete_time_column.py` shows it. Examples: `examples/time_slot_state_machine.py`,
-`examples/auto_signal_roles.py`, `examples/context_day_type.py`.
+`examples/auto_signal_roles.py`, `examples/context_day_type.py`, `examples/episode_constraints.py`, `examples/batch_process_episodes.py`.
 
 ---
 

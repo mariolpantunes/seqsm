@@ -52,12 +52,14 @@ def main() -> None:
 
     enc = model.state_encoder
     logout_id = enc.dict_to_state({"action": "logout"})
-    login_id = enc.dict_to_state({"action": "login"})
 
-    # Inspection: transition probability from logout to login across episodes is strictly 0.0
+    # Inspection: because 'logout' only appears at the end of sessions,
+    # episode cuts ensure it has zero outgoing transitions learned (window index == -1).
     assert model.markov_chain is not None
-    p_logout_login = model.markov_chain.transition_matrix[logout_id, login_id]
-    print(f"P(logout -> login across episode breaks): {p_logout_login:.4f} (strictly cut)")
+    k_enc = model.markov_chain.encoder
+    u_logout = k_enc.encode_window((logout_id,))
+    print(f"Observed outgoing window for 'logout': {u_logout} (-1: strictly cut at episode boundaries)")
+    assert u_logout == -1
 
     # 2. Infinite rollout: by default, simulation continues for any arbitrary window H
     # starting from stationary distribution or regime without absorbing terminal states.
