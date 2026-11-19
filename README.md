@@ -119,6 +119,25 @@ If time is already a discrete integer column (a tick/slot index), pass it as `ti
 pick the bin count; `at=` and `start_time=` are then int ticks. `examples/discrete_time_column.py` shows it. Examples: `examples/time_slot_state_machine.py`,
 `examples/auto_signal_roles.py`, `examples/context_day_type.py`, `examples/episode_constraints.py`, `examples/batch_process_episodes.py`.
 
+### 5. Streaming & Live Sensor Viewer
+
+For online event-by-event learning from live sensors, `StreamingSeqSM` wraps `SeqSM.partial_fit` with a rolling `(k+1)`-event buffer, optional fixed-edge discretization, next-state probability ranking, and JSON graph export:
+
+```python
+from seqsm import StreamingSeqSM
+
+stream = StreamingSeqSM(k=2, mode="clock", decay=0.98, bins={"cpu": [0, 20, 50, 80, 100]})
+update = stream.update({"cpu": 35.2})
+print(update["predictions"])   # ranked next-state probabilities
+print(update["graph"])         # JSON-serializable nodes and edges
+```
+
+Run the zero-dependency live sensor web viewer (reads `/proc/stat` & `/proc/meminfo`, or pass `--simulate`):
+
+```bash
+PYTHONPATH=src venv/bin/python examples/live_sensor_viewer.py
+```
+
 ---
 
 ## Development & Quality Gate

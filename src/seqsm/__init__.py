@@ -9,6 +9,7 @@ from seqsm.motifs import compare_chains, score_anomalies
 from seqsm.periodic import PhaseConditionedMarkovChain, select_regimes
 from seqsm.roles import ColumnProfile, SignalRoles, discretize_columns, infer_roles
 from seqsm.schedule import ScheduleGenerator
+from seqsm.streaming import StreamingSeqSM
 from seqsm.timeslots import RegimeSpec, TimeConfig, resample_to_slots
 from seqsm.types import (
     DwellDistribution,
@@ -40,6 +41,7 @@ __all__ = [
     "StateEncoder",
     "StateMachine",
     "StatePlotData",
+    "StreamingSeqSM",
     "TimeConfig",
     "VariableOrderMarkovChain",
     "compare_chains",
